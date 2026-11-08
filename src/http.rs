@@ -115,12 +115,21 @@ fn connect(host: &str, port: u16, tls: bool) -> Result<Stream> {
 }
 
 pub fn post(url: &str, headers: &[(&str, &str)], body: &[u8]) -> Result<Response> {
+    request("POST", url, headers, body)
+}
+
+/// A GET request. Used by the `net.fetch` plugin service.
+pub fn get(url: &str) -> Result<Response> {
+    request("GET", url, &[], b"")
+}
+
+fn request(method: &str, url: &str, headers: &[(&str, &str)], body: &[u8]) -> Result<Response> {
     let (host, port, path) = split_url(url)?;
     let tls = url.starts_with("https://");
     let mut stream = connect(&host, port, tls)?;
 
     let mut req = Vec::new();
-    req.extend_from_slice(format!("POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Length: {}\r\nConnection: close\r\n", body.len()).as_bytes());
+    req.extend_from_slice(format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nContent-Length: {}\r\nConnection: close\r\n", body.len()).as_bytes());
     for (k, v) in headers {
         req.extend_from_slice(format!("{k}: {v}\r\n").as_bytes());
     }

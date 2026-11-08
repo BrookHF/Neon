@@ -11,6 +11,7 @@ use crate::config::Config;
 use crate::error::{AgentError, Result};
 use crate::llm::Adapter;
 use crate::messages::{Event, Message, Part, Request, Role, ToolCall, estimate_tokens};
+use crate::plugin::PluginHost;
 use crate::prompt::build_system;
 use crate::tools::{Registry, ToolCtx, ToolResult};
 
@@ -129,6 +130,7 @@ pub struct TurnOutcome {
 pub struct Agent {
     pub adapter: Arc<dyn Adapter>,
     pub registry: Arc<Registry>,
+    pub plugins: Arc<Mutex<PluginHost>>,
     pub cfg: Arc<Config>,
     pub sink: Arc<dyn Sink>,
     pub controls: Arc<Controls>,
@@ -137,6 +139,12 @@ pub struct Agent {
 
 impl Agent {
     pub fn run_turn(&self, history: &mut Vec<Message>) -> Result<TurnOutcome> {
+        // Plugin swaps take effect at the turn boundary, never mid-request.
+        if let Ok(mut host) = self.plugins.lock() {
+            if let Err(e) = host.apply(&self.registry) {
+                self.sink.note(&format!("plugin change failed: {e}"));
+            }
+        }
         let outcome = self.run_inner(history);
         // Leftover steering and the abort switch belong to the turn that just ended.
         self.controls.reset();

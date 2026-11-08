@@ -9,7 +9,9 @@ use neon::agent::{Agent, Controls, StdioSink};
 use neon::config::{Config, default_path};
 use neon::llm::{Adapter, FixtureAdapter, GeminiAdapter};
 use neon::messages::{Message, estimate_tokens};
-use neon::tools::{BashTool, Registry};
+use neon::plugin::PluginHost;
+use neon::profile;
+use neon::tools::{BashTool, PluginRow, Registry};
 use neon::ui;
 use neon::VERSION;
 
@@ -20,11 +22,14 @@ const HELP: &str = r#"neon - a minimal coding agent
   neon -p "task"          run one task and exit
   neon --fixture f.jsonl  replay a recorded model stream, no key and no network
   neon --model <name>     override the model from config
+  neon --profile <name>   plugin rows from ~/.config/neon/profiles/<name>.yaml
+  neon --patch <file>     patch layer over the profile, last layer wins
   neon --config <path>    use another config file
 
 TUI keys: Enter sends or steers · Ctrl+C aborts a run, quits when idle · Ctrl+D quits
+TUI commands: /plugin list|load|unload|reload (applies at the next turn)
 Config: ~/.config/neon/config.yaml (api_key there, never in the environment)
-Plain REPL commands: :tools, :model, :hist, :quit
+Plain REPL commands: :tools, :model, :hist, :plugin <verb>, :quit
 "#;
 
 struct Args {
@@ -32,6 +37,8 @@ struct Args {
     fixture: Option<PathBuf>,
     model: Option<String>,
     config: Option<PathBuf>,
+    profile: Option<String>,
+    patches: Vec<PathBuf>,
     plain: bool,
     help: bool,
     version: bool,
@@ -43,6 +50,8 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
         fixture: None,
         model: None,
         config: None,
+        profile: None,
+        patches: Vec::new(),
         plain: false,
         help: false,
         version: false,
@@ -68,6 +77,16 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
             "--config" => {
                 let v = raw.get(i + 1).ok_or("--config needs a path")?;
                 a.config = Some(PathBuf::from(v));
+                i += 2;
+            }
+            "--profile" => {
+                let v = raw.get(i + 1).ok_or("--profile needs a name")?;
+                a.profile = Some(v.clone());
+                i += 2;
+            }
+            "--patch" => {
+                let v = raw.get(i + 1).ok_or("--patch needs a file")?;
+                a.patches.push(PathBuf::from(v));
                 i += 2;
             }
             "--plain" => {
@@ -117,6 +136,9 @@ fn main() -> ExitCode {
     if let Some(m) = args.model.clone() {
         cfg.model = m;
     }
+    if let Some(p) = args.profile.clone() {
+        cfg.profile = p;
+    }
 
     let adapter: Arc<dyn Adapter> = match &args.fixture {
         Some(path) => match FixtureAdapter::from_file(path) {
@@ -129,8 +151,30 @@ fn main() -> ExitCode {
         None => Arc::new(GeminiAdapter::new(cfg.clone())),
     };
 
-    let mut registry = Registry::new();
-    registry.add(Box::new(BashTool));
+    let registry = Registry::new();
+    registry.add(Box::new(BashTool), PluginRow::Core);
+
+    let plugins = Arc::new(Mutex::new(PluginHost::new(
+        Arc::new(neon::tools::ToolCtx {
+            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            timeout_secs: cfg.bash_timeout_secs,
+            excerpt_bytes: cfg.bash_excerpt_bytes,
+            spill_dir: cfg.spill_dir.clone(),
+        }),
+        Arc::new(|line: &str| eprintln!("[plugin] {line}")),
+    )));
+    match profile::layers(&profile::profile_dir(), &cfg.profile, &args.patches) {
+        Ok(rows) => {
+            let mut host = plugins.lock().expect("plugin host");
+            for row in rows {
+                host.queue(row);
+            }
+        }
+        Err(e) => {
+            eprintln!("neon: {e}");
+            return ExitCode::from(7);
+        }
+    }
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let controls = Arc::new(Controls::default());
@@ -141,6 +185,7 @@ fn main() -> ExitCode {
         let agent = Agent {
             adapter,
             registry: Arc::new(registry),
+            plugins: plugins.clone(),
             cfg,
             sink: Arc::new(StdioSink),
             controls,
@@ -160,6 +205,7 @@ fn main() -> ExitCode {
         return plain_repl(
             adapter,
             Arc::new(registry),
+            plugins,
             cfg,
             controls,
             session,
@@ -168,7 +214,7 @@ fn main() -> ExitCode {
         );
     }
 
-    match ui::run(adapter, Arc::new(registry), cfg, session, controls, cwd) {
+    match ui::run(adapter, Arc::new(registry), plugins, cfg, session, controls, cwd) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("neon: the terminal failed: {e}");
@@ -181,6 +227,7 @@ fn main() -> ExitCode {
 fn plain_repl(
     adapter: Arc<dyn Adapter>,
     registry: Arc<Registry>,
+    plugins: Arc<Mutex<PluginHost>>,
     cfg: Arc<Config>,
     controls: Arc<Controls>,
     session: Arc<Mutex<Vec<Message>>>,
@@ -190,6 +237,7 @@ fn plain_repl(
     let agent = Agent {
         adapter,
         registry: registry.clone(),
+        plugins: plugins.clone(),
         cfg: cfg.clone(),
         sink: Arc::new(StdioSink),
         controls,
@@ -231,6 +279,15 @@ fn plain_repl(
                     history.len(),
                     estimate_tokens(&history)
                 );
+                continue;
+            }
+            other if other == ":plugin" || other.starts_with(":plugin ") => {
+                let rest = other.trim_start_matches(":plugin").to_string();
+                match plugins.lock().map(|mut host| host.handle_command(&rest)) {
+                    Ok(Ok(note)) => println!("{note}"),
+                    Ok(Err(e)) => println!("plugin: {e}"),
+                    Err(_) => println!("plugin host is busy"),
+                }
                 continue;
             }
             other if other.starts_with(':') => {

@@ -80,7 +80,27 @@ def main():
     n = norm(s)
     results.append(("turn renders cards", "echohellofromneon" in n and "->bash" in n))
     results.append(("reply shown", "Itprintedhellofromneon" in n))
-    results.append(("status bar", "tokens" in n and "2steps" in n))
+    results.append(("status bar", "tok" in n and "2steps" in n))
+
+    # Profile rows load at the turn boundary; /plugin list shows them after the turn.
+    profiles = os.path.join(os.path.expanduser("~"), ".config", "neon", "profiles")
+    os.makedirs(profiles, exist_ok=True)
+    smoke = os.path.join(profiles, "smoke.yaml")
+    with open(smoke, "w") as f:
+        f.write(
+            "rows:\n  - id: echo\n"
+            f"    plugin: {os.path.join(REPO, 'fixtures', 'plugins', 'echo')}\n"
+            "    grants: [log, clock.now]\n"
+        )
+    s, rc = screen(
+        ["--fixture", "fixtures/demo.jsonl", "--profile", "smoke"],
+        [(b"say hello\r", 0.2), (b"/plugin list\r", 2.2)],
+        1.5,
+    )
+    n = norm(s)
+    results.append(("profile row loaded", "loaded:echo" in n))
+    results.append(("plugin count in status", "1plugins" in n))
+    os.remove(smoke)
 
     slow = os.path.join(REPO, "fixtures", "slow-tmp.jsonl")
     write_fixture(
@@ -117,6 +137,7 @@ def main():
         print(f"{name}: {'PASS' if ok else 'FAIL'}")
         if not ok:
             failed += 1
+            print(f"  screen tail: {norm(s)[-300:]}")
     print("all checks passed" if failed == 0 else f"{failed} check(s) failed")
     return 1 if failed else 0
 

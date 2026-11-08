@@ -3,11 +3,19 @@
 use std::io::Read as _;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
 use crate::messages::{ToolCall, ToolSchema};
+
+/// Where a registry row came from: the built-in core, or a plugin row id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PluginRow {
+    Core,
+    Plugin(String),
+}
 
 pub struct ToolCtx {
     pub cwd: PathBuf,
@@ -32,52 +40,116 @@ pub trait Tool: Send + Sync {
 pub type Interceptor =
     Box<dyn Fn(&ToolCall, &mut dyn FnMut(&ToolCall) -> ToolResult) -> ToolResult + Send + Sync>;
 
+/// Thread-safe: the worker applies plugin rows at the turn boundary while the UI reads schemas.
+/// Rows are Arc-wrapped so no lock is held while a tool runs.
 pub struct Registry {
-    tools: Vec<Box<dyn Tool>>,
-    interceptors: Vec<Interceptor>,
+    tools: Mutex<Vec<(Arc<dyn Tool>, PluginRow)>>,
+    interceptors: Mutex<Vec<(Arc<Interceptor>, PluginRow)>>,
 }
 
 impl Registry {
     pub fn new() -> Self {
         Registry {
-            tools: Vec::new(),
-            interceptors: Vec::new(),
+            tools: Mutex::new(Vec::new()),
+            interceptors: Mutex::new(Vec::new()),
         }
     }
 
-    pub fn add(&mut self, tool: Box<dyn Tool>) {
-        self.tools.push(tool);
+    pub fn add(&self, tool: Box<dyn Tool>, row: PluginRow) {
+        let tool: Arc<dyn Tool> = tool.into();
+        self.tools.lock().expect("registry tools lock").push((tool, row));
     }
 
-    pub fn add_interceptor(&mut self, i: Interceptor) {
-        self.interceptors.push(i);
+    pub fn add_interceptor(&self, i: Interceptor, row: PluginRow) {
+        let i: Arc<Interceptor> = Arc::new(i);
+        self.interceptors.lock().expect("registry interceptor lock").push((i, row));
+    }
+
+    /// Drop every row a plugin contributed. Used by unload and by re-registration.
+    pub fn remove_all_plugin_rows(&self) {
+        self.tools.lock().expect("registry tools lock").retain(|(_, r)| !matches!(r, PluginRow::Plugin(_)));
+        self.interceptors
+            .lock()
+            .expect("registry interceptor lock")
+            .retain(|(_, r)| !matches!(r, PluginRow::Plugin(_)));
     }
 
     pub fn schemas(&self) -> Vec<ToolSchema> {
         self.tools
+            .lock()
+            .expect("registry tools lock")
             .iter()
-            .map(|t| ToolSchema {
+            .map(|(t, r)| ToolSchema {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
                 parameters: t.parameters(),
+                plugin_row: match r {
+                    PluginRow::Plugin(id) => id.clone(),
+                    PluginRow::Core => String::new(),
+                },
+                index: 0,
             })
             .collect()
     }
 
-    pub fn execute(&self, call: &ToolCall, ctx: &ToolCtx) -> ToolResult {
-        self.run_at(0, call, ctx)
+    /// Ids of the plugin rows that currently contribute tools or interceptors.
+    pub fn plugin_rows(&self) -> Vec<String> {
+        let mut ids: Vec<String> = Vec::new();
+        for (_, row) in self.tools.lock().expect("registry tools lock").iter() {
+            if let PluginRow::Plugin(id) = row {
+                ids.push(id.clone());
+            }
+        }
+        for (_, row) in self
+            .interceptors
+            .lock()
+            .expect("registry interceptor lock")
+            .iter()
+        {
+            if let PluginRow::Plugin(id) = row {
+                ids.push(id.clone());
+            }
+        }
+        ids.sort();
+        ids.dedup();
+        ids
     }
 
-    fn run_at(&self, index: usize, call: &ToolCall, ctx: &ToolCtx) -> ToolResult {
-        if index == self.interceptors.len() {
+    pub fn execute(&self, call: &ToolCall, ctx: &ToolCtx) -> ToolResult {
+        // Copy the Arc-wrapped interceptors, then run without holding any lock.
+        let interceptors: Vec<Arc<Interceptor>> = self
+            .interceptors
+            .lock()
+            .expect("registry interceptor lock")
+            .iter()
+            .map(|(i, _)| i.clone())
+            .collect();
+        self.run_at(&interceptors, 0, call, ctx)
+    }
+
+    fn run_at(
+        &self,
+        interceptors: &[Arc<Interceptor>],
+        index: usize,
+        call: &ToolCall,
+        ctx: &ToolCtx,
+    ) -> ToolResult {
+        if index == interceptors.len() {
             return self.run_tool(call, ctx);
         }
-        let mut next = |c: &ToolCall| self.run_at(index + 1, c, ctx);
-        self.interceptors[index](call, &mut next)
+        let mut next = |c: &ToolCall| self.run_at(interceptors, index + 1, c, ctx);
+        interceptors[index](call, &mut next)
     }
 
     fn run_tool(&self, call: &ToolCall, ctx: &ToolCtx) -> ToolResult {
-        match self.tools.iter().find(|t| t.name() == call.name) {
+        let tool = self
+            .tools
+            .lock()
+            .expect("registry tools lock")
+            .iter()
+            .find(|(t, _)| t.name() == call.name)
+            .map(|(t, _)| t.clone());
+        match tool {
             Some(tool) => tool.run(&call.args, ctx, &call.id),
             None => ToolResult {
                 content: format!("unknown tool: {}", call.name),
@@ -269,8 +341,8 @@ mod tests {
         let dir = std::path::PathBuf::from("/tmp/neon-test-runs");
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
-        let mut registry = Registry::default();
-        registry.add(Box::new(BashTool));
+        let registry = Registry::default();
+        registry.add(Box::new(BashTool), PluginRow::Core);
         let call = ToolCall {
             id: "call_0".to_string(),
             name: "bash".to_string(),
@@ -290,8 +362,8 @@ mod tests {
         let dir = std::path::PathBuf::from("/tmp/neon-test-timeout");
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
-        let mut registry = Registry::default();
-        registry.add(Box::new(BashTool));
+        let registry = Registry::default();
+        registry.add(Box::new(BashTool), PluginRow::Core);
         let call = ToolCall {
             id: "c".to_string(),
             name: "bash".to_string(),
@@ -307,18 +379,21 @@ mod tests {
         let dir = std::path::PathBuf::from("/tmp/neon-test-block");
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
-        let mut registry = Registry::default();
-        registry.add(Box::new(BashTool));
-        registry.add_interceptor(Box::new(|call, next| {
-            if call.args.get("command").and_then(|c| c.as_str()).unwrap_or("").contains("rm -rf") {
-                ToolResult {
-                    content: "blocked by policy".to_string(),
-                    is_error: true,
+        let registry = Registry::default();
+        registry.add(Box::new(BashTool), PluginRow::Core);
+        registry.add_interceptor(
+            Box::new(|call, next| {
+                if call.args.get("command").and_then(|c| c.as_str()).unwrap_or("").contains("rm -rf") {
+                    ToolResult {
+                        content: "blocked by policy".to_string(),
+                        is_error: true,
+                    }
+                } else {
+                    next(call)
                 }
-            } else {
-                next(call)
-            }
-        }));
+            }),
+            PluginRow::Core,
+        );
         let blocked = registry.execute(
             &ToolCall {
                 id: "a".to_string(),

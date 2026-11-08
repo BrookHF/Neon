@@ -1,0 +1,3 @@
+id: echo
+tools: [echo, when]
+capabilities: [log, clock.now]

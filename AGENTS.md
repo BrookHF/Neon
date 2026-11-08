@@ -10,6 +10,7 @@ cargo build --release            # dev/host build on glibc
 cargo test                       # fixture replay, no key, no network
 python3 scripts/tui-smoke.py     # drive the TUI on a pty, no key
 cargo run                        # interactive TUI
+sh ~/src/neon-plugin/scripts/build.sh  # rebuild fixtures/plugins wasm (wasm32 target)
 rustup target add aarch64-unknown-linux-musl
 cargo build --release --target aarch64-unknown-linux-musl   # portable static release
 ```
@@ -25,6 +26,8 @@ No root is available in this environment. Never use `apt`; rustup lives in `~/.c
   profile row or a plugin.
 - Keep the plugin ABI stable. Changing it needs a rebuilt fixture plugin and a bumped
   `neon_abi_version()`.
+- Plugin runtime is `wasmi` (pure Rust interpreter). Do not switch back to the `wasm3`
+  crate: it needs clang+bindgen at build and emits native code, which PRoot blocks.
 - A plugin gets only the host imports its manifest grants. Ungranted names are never wired.
 - Plugin swaps take effect at the turn boundary, never mid-request.
 - The UI thread never takes the session lock. The worker owns it for the whole turn, and the

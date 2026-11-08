@@ -304,6 +304,8 @@ mod tests {
                     "properties": { "command": { "type": "string" } },
                     "required": ["command"],
                 }),
+                plugin_row: String::new(),
+                index: 0,
             }],
             model: "gemini-3.5-flash-lite".to_string(),
             temperature: None,

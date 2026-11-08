@@ -6,6 +6,8 @@ pub mod error;
 pub mod http;
 pub mod llm;
 pub mod messages;
+pub mod plugin;
+pub mod profile;
 pub mod prompt;
 pub mod tools;
 pub mod ui;

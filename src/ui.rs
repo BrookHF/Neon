@@ -19,6 +19,7 @@ use crate::agent::{Agent, Controls, Sink};
 use crate::config::Config;
 use crate::llm::Adapter;
 use crate::messages::{Message, ToolCall, estimate_tokens};
+use crate::plugin::PluginHost;
 use crate::tools::{Registry, ToolResult};
 
 #[derive(Clone, Debug)]
@@ -116,7 +117,7 @@ fn clip(text: &str, width: usize) -> String {
     }
 }
 
-fn status_line(cfg: &Config, cwd: &PathBuf, shared: &Shared) -> String {
+fn status_line(cfg: &Config, cwd: &PathBuf, shared: &Shared, registry: &Registry) -> String {
     let tokens = shared.tokens.load(Ordering::Relaxed);
     let state = if shared.running.load(Ordering::Relaxed) {
         "running"
@@ -124,10 +125,11 @@ fn status_line(cfg: &Config, cwd: &PathBuf, shared: &Shared) -> String {
         "idle"
     };
     let extra = shared.note_status.lock().expect("status lock").clone();
+    let plugins = registry.plugin_rows().len();
+    let folder = cwd.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| cwd.display().to_string());
     format!(
-        "{} · {} · {state} · {tokens} tokens · {extra}",
+        "{} · {folder} · {state} · {tokens} tok · {plugins} plugins · {extra}",
         cfg.model,
-        cwd.display(),
     )
 }
 
@@ -180,6 +182,7 @@ fn render(
 pub fn run(
     adapter: Arc<dyn Adapter>,
     registry: Arc<Registry>,
+    plugins: Arc<Mutex<PluginHost>>,
     cfg: Arc<Config>,
     session: Arc<Mutex<Vec<Message>>>,
     controls: Arc<Controls>,
@@ -191,7 +194,7 @@ pub fn run(
 
     let shared = Arc::new(Shared::default());
     shared.push(Row::Note(format!(
-        "neon ready · {} · {} plugins",
+        "neon ready · {} · {} tools · /plugin list|load|unload|reload",
         cfg.model,
         registry.schemas().len()
     )));
@@ -226,12 +229,21 @@ pub fn run(
                         if shared.running.load(Ordering::Relaxed) {
                             controls.steer(&msg);
                             shared.push(Row::User(msg));
+                        } else if msg.trim().starts_with("/plugin") {
+                            let rest = msg.trim().trim_start_matches("/plugin").to_string();
+                            shared.push(Row::User(msg));
+                            match plugins.lock().map(|mut host| host.handle_command(&rest)) {
+                                Ok(Ok(note)) => shared.push(Row::Note(note)),
+                                Ok(Err(e)) => shared.push(Row::Note(format!("plugin: {e}"))),
+                                Err(_) => shared.push(Row::Note("plugin host is busy".to_string())),
+                            }
                         } else {
                             shared.push(Row::User(msg.clone()));
                             shared.running.store(true, Ordering::Relaxed);
                             let worker = Worker {
                                 adapter: adapter.clone(),
                                 registry: registry.clone(),
+                                plugins: plugins.clone(),
                                 cfg: cfg.clone(),
                                 session: session.clone(),
                                 controls: controls.clone(),
@@ -250,7 +262,7 @@ pub fn run(
                 _ => {}
             }
         }
-        let status = status_line(&cfg, &cwd, &shared);
+        let status = status_line(&cfg, &cwd, &shared, &registry);
         render(&mut terminal, &shared, &input, &status)?;
     }
 
@@ -262,6 +274,7 @@ pub fn run(
 struct Worker {
     adapter: Arc<dyn Adapter>,
     registry: Arc<Registry>,
+    plugins: Arc<Mutex<PluginHost>>,
     cfg: Arc<Config>,
     session: Arc<Mutex<Vec<Message>>>,
     controls: Arc<Controls>,
@@ -277,6 +290,7 @@ impl Worker {
         let agent = Agent {
             adapter: self.adapter.clone(),
             registry: self.registry.clone(),
+            plugins: self.plugins.clone(),
             cfg: self.cfg.clone(),
             sink,
             controls: self.controls.clone(),

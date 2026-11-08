@@ -36,7 +36,7 @@ carry the seams. Two dispatch modes only: `emit` (observe) and `waterfall` (arou
 - Release: static musl (`rustup target add aarch64-unknown-linux-musl`, plus x86_64).
   TLS is rustls + webpki-roots, so a static binary needs no system libraries at all.
 - Crates (build-time only): `serde`, `serde_json`, `yaml-rust2`, `rustls`, `webpki-roots`,
-  `wasm3`, `ratatui`, `crossterm`. HTTP/1.1 and SSE are hand-written on `TcpStream`.
+  `wasmi`, `ratatui`, `crossterm`. HTTP/1.1 and SSE are hand-written on `TcpStream`.
 
 ## Layout (XDG)
 
@@ -95,19 +95,26 @@ Native wire format, not the OpenAI-compatible one.
 ## Plugins
 
 - A plugin is a `plugin.wasm` plus a `plugin.yaml` manifest: `id`, `tools`, `capabilities`.
-- Runtime: the `wasm3` interpreter inside the binary. No JIT, so it works under PRoot on
-  Android, and the build stays small (RAM on this phone is tight).
-- ABI, host-owned strings, four exports:
+- Runtime: the `wasmi` interpreter inside the binary (pure Rust, no JIT), so it works
+  under PRoot on Android and needs no C toolchain. Chosen over the `wasm3` crate, whose
+  build needs clang+bindgen and whose runtime emits native code. The build stays small
+  (RAM on this phone is tight).
+- ABI, host-owned strings, five exports plus memory and allocator wrappers:
   - `neon_abi_version() -> i32`
   - `neon_tools() -> ptr` to a JSON array of `{name, description, parameters}`
   - `neon_handle(tool_index, args_ptr, args_len) -> ptr` to `{ok, content, error}`
   - `neon_dispose()`
-  Host imports for memory: `alloc(len) -> ptr`, `free(ptr)`.
+  - `neon_scratch_base() -> i32`, the address of the plugin's own scratch array
+  - `memory` (linear memory), and `alloc(len) -> ptr` / `free(ptr)` wrapping the host imports.
+  Host imports `neon.alloc(len) -> ptr` and `neon.free(ptr)` bump inside that scratch array;
+  a returned pointer carries a 4-byte little-endian length just before the payload.
 - Host services, gated per manifest grant: `fs.read`, `fs.write`, `bash.run`, `net.fetch`,
   `clock.now`, `log`. A plugin gets only the imports it was granted; an ungranted name is not
   wired at all, so the plugin cannot call it.
 - Authoring: a small `neon-plugin` crate authors build with
-  `cargo build --target wasm32-unknown-unknown`. It wraps the four exports and the import stubs.
+  `cargo build --target wasm32-unknown-unknown`. It wraps the four exports and the import
+  stubs. The crate lives in the sibling repo `~/src/neon-plugin`; committed fixture `.wasm`
+  files in `fixtures/plugins/` let tests run without a plugin build step.
 - Hot swap at the turn boundary: `/plugin list|load|unload|reload`. Unload runs the plugin's
   disposers, so its tools and prompt sections unwind. A running request never sees a changing
   tool set. Optional directory poll (1 s) reloads changed files at the next turn boundary.

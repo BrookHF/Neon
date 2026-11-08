@@ -6,7 +6,8 @@ use neon::agent::{Agent, Controls, VecSink};
 use neon::config::Config;
 use neon::llm::FixtureAdapter;
 use neon::messages::{Message, Part, Role};
-use neon::tools::{BashTool, Registry};
+use neon::plugin::PluginHost;
+use neon::tools::{BashTool, PluginRow, Registry, ToolCtx};
 
 fn fixture(name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -30,13 +31,23 @@ fn harness(
     let mut cfg = Config::default();
     cfg.spill_dir = dir.join("spill");
     cfg.max_steps = max_steps;
-    let mut registry = Registry::new();
-    registry.add(Box::new(BashTool));
+    let registry = Registry::new();
+    registry.add(Box::new(BashTool), PluginRow::Core);
     let sink = Arc::new(VecSink::default());
     let controls = Arc::new(Controls::default());
+    let plugins = Arc::new(std::sync::Mutex::new(PluginHost::new(
+        Arc::new(ToolCtx {
+            cwd: dir.clone(),
+            timeout_secs: cfg.bash_timeout_secs,
+            excerpt_bytes: cfg.bash_excerpt_bytes,
+            spill_dir: cfg.spill_dir.clone(),
+        }),
+        Arc::new(|_line: &str| {}),
+    )));
     let agent = Agent {
         adapter: Arc::new(FixtureAdapter::from_file(&fixture(fixture_name)).unwrap()),
         registry: Arc::new(registry),
+        plugins,
         cfg: Arc::new(cfg),
         sink: sink.clone(),
         controls: controls.clone(),

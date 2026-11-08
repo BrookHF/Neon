@@ -69,6 +69,10 @@ pub struct ToolSchema {
     pub name: String,
     pub description: String,
     pub parameters: Value,
+    /// The plugin row that contributed this tool; empty for core tools.
+    pub plugin_row: String,
+    /// Position in the plugin's `neon_tools()` array; 0 for core tools.
+    pub index: u32,
 }
 
 #[derive(Clone, Debug)]
