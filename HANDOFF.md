@@ -123,6 +123,9 @@ RUST_MIN_STACK = "8000000"` is committed for tests and UI worker threads.
 - Fixed a milestone 2 bug: the TUI worker never pushed the typed message into history
   (fixtures hid it because the fake adapter ignores the request). The worker now owns the
   input string and pushes it under the history lock.
+- Transcript lines word-wrap (`ui.rs` `wrap_to`, hard-breaking over-long words); long
+  replies stay inside the window. Before this the render clipped each line at terminal
+  width, cutting replies mid-sentence.
 
 ## Things already learned (do not rediscover)
 

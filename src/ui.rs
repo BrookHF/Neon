@@ -12,7 +12,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::Paragraph;
 use ratatui::Terminal;
 
 use crate::agent::{Agent, Controls, Sink};
@@ -109,13 +109,41 @@ fn compact(value: &serde_json::Value) -> String {
     }
 }
 
-fn clip(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
-        text.to_string()
-    } else {
-        let cut: String = text.chars().take(width.saturating_sub(1)).collect();
-        format!("{cut}\u{2026}")
+/// Greedy word wrap: split on newlines, then pack words into width-sized lines.
+/// Words longer than the width are hard-broken, so nothing is ever dropped.
+fn wrap_to(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out: Vec<String> = Vec::new();
+    for seg in text.split('\n') {
+        if seg.trim().is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let mut line = String::new();
+        for word in seg.split_whitespace() {
+            let mut w = word.to_string();
+            while w.chars().count() > width {
+                if !line.is_empty() {
+                    out.push(std::mem::take(&mut line));
+                }
+                out.push(w.chars().take(width).collect());
+                w = w.chars().skip(width).collect();
+            }
+            if line.is_empty() {
+                line = w;
+            } else if line.chars().count() + 1 + w.chars().count() <= width {
+                line.push(' ');
+                line.push_str(&w);
+            } else {
+                out.push(std::mem::take(&mut line));
+                line = w;
+            }
+        }
+        if !line.is_empty() {
+            out.push(line);
+        }
     }
+    out
 }
 
 fn status_line(cfg: &Config, cwd: &PathBuf, shared: &Shared, registry: &Registry) -> String {
@@ -153,31 +181,48 @@ fn render(
 
         let mut lines: Vec<String> = Vec::new();
         for row in shared.rows.lock().expect("rows lock").iter() {
-            lines.push(row.line());
+            lines.extend(wrap_to(&row.line(), width));
         }
-        for line in shared.live.lock().expect("live lock").split('\n') {
-            lines.push(line.to_string());
-        }
+        lines.extend(wrap_to(&shared.live.lock().expect("live lock"), width));
         let tail: Vec<String> = lines
             .iter()
             .rev()
             .take(height)
             .rev()
-            .map(|l| clip(l, width))
+            .cloned()
             .collect();
         let body = tail.join("\n");
 
         frame.render_widget(Paragraph::new(status), areas[0]);
-        frame.render_widget(
-            Paragraph::new(body).wrap(Wrap { trim: true }),
-            areas[1],
-        );
+        frame.render_widget(Paragraph::new(body), areas[1]);
         frame.render_widget(
             Paragraph::new(format!("> {input}\nEnter sends · Ctrl+C abort or quit")),
             areas[2],
         );
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrap_to;
+
+    #[test]
+    fn long_text_wraps_instead_of_being_cut() {
+        let text = "alpha ".repeat(20) + "ENDWORD";
+        let lines = wrap_to(&text, 40);
+        assert!(lines.iter().all(|l| l.chars().count() <= 40));
+        assert!(lines.last().unwrap().contains("ENDWORD")); // nothing past the width is lost
+    }
+
+    #[test]
+    fn newlines_kept_and_long_words_hard_broken() {
+        let lines = wrap_to(&format!("short\nxsaurus\n{}", "z".repeat(95)), 10);
+        assert_eq!(lines[0], "short");
+        assert_eq!(lines[1], "xsaurus");
+        assert_eq!(lines[2..].concat().chars().count(), 95);
+        assert!(lines.iter().all(|l| l.chars().count() <= 10));
+    }
 }
 
 pub fn run(

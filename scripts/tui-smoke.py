@@ -133,6 +133,14 @@ def main():
     results.append(("plugin count in status", "1plugins" in n))
     os.remove(smoke)
 
+    # Long replies must wrap inside the window, not be cut at the first line.
+    long = os.path.join(REPO, "fixtures", "long-tmp.jsonl")
+    write_fixture(long, [chunk([{"text": "word " * 40 + "ENDWORD"}])])
+    s, rc = screen(["--fixture", long], [(b"go\r", 0.2)], 2.5)
+    n = norm(s)
+    results.append(("long reply wraps in window", "ENDWORD" in n))
+    os.remove(long)
+
     slow = os.path.join(REPO, "fixtures", "slow-tmp.jsonl")
     write_fixture(
         slow,
