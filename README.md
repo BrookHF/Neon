@@ -1,0 +1,30 @@
+# Neon
+
+A minimal coding agent in Rust. One tool (`bash`), Gemini over SSE, plugins as WASM.
+See `DESIGN.md` for the contract and `AGENTS.md` for the build rules.
+
+## Run
+
+```sh
+cargo build --release
+cargo run                    # interactive REPL
+cargo run -- -p "list this folder"   # print mode
+cargo run -- --fixture fixtures/demo.jsonl   # no key, no network
+cargo test                   # fixture replay, offline
+```
+
+Config lives at `~/.config/neon/config.yaml`. Put your Gemini key in `api_key`, keep the
+file mode `0600`. `cargo run` reads it. `neon --help` lists the flags.
+
+## What is in the box
+
+- `src/agent.rs` — the turn/step loop
+- `src/llm.rs` — the LLM seam: `GeminiAdapter` and `FixtureAdapter`
+- `src/http.rs` — hand-written HTTP/1.1 over TLS (rustls + webpki-roots)
+- `src/tools.rs` — the registry, the waterfall pipeline, and `bash`
+- `src/prompt.rs` — the short system prompt plus `AGENTS.md` discovery
+- `src/config.rs` — YAML config from `~/.config/neon/config.yaml`
+
+Milestone 1 is done: loop, one bash tool, streaming, fixture tests. Milestone 2 adds the
+ratatui TUI and steering. Milestone 3 adds WASM plugins, profiles, and hot swap. Milestone 4
+adds the session log, `--resume`, and compaction.

@@ -1,0 +1,3 @@
+{"candidates": [{"content": {"parts": [{"functionCall": {"name": "bash", "args": {"command": "echo one"}}}]}, "finish_reason": "STOP"}]}
+{"candidates": [{"content": {"parts": [{"functionCall": {"name": "bash", "args": {"command": "echo two"}}}]}, "finish_reason": "STOP"}]}
+{"candidates": [{"content": {"parts": [{"functionCall": {"name": "bash", "args": {"command": "echo three"}}}]}, "finish_reason": "STOP"}]}

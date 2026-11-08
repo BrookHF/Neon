@@ -1,0 +1,2 @@
+{"candidates": [{"content": {"parts": [{"text": "I will run the command."}, {"functionCall": {"name": "bash", "args": {"command": "echo hello from neon"}}}]}, "finish_reason": "STOP"}]}
+{"candidates": [{"content": {"parts": [{"text": "It printed hello from neon. Nothing else to do."}]}, "finish_reason": "STOP"}]}

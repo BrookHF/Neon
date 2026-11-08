@@ -1,0 +1,20 @@
+[package]
+name = "neon"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "A minimal coding agent: one bash tool, Gemini over SSE, plugins as WASM."
+
+[[bin]]
+name = "neon"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+webpki-roots = "1"
+yaml-rust2 = "0.10"
+
+[profile.release]
+opt-level = 2
