@@ -776,6 +776,7 @@ mod tests {
             timeout_secs: 10,
             excerpt_bytes: 512,
             spill_dir: PathBuf::from("/tmp/neon-test-plugin-spill"),
+            abort: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 

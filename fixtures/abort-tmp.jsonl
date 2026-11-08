@@ -1,2 +1,0 @@
-{"candidates": [{"content": {"parts": [{"functionCall": {"name": "bash", "args": {"command": "sleep 3; echo a"}}}, {"functionCall": {"name": "bash", "args": {"command": "sleep 3; echo b"}}}]}, "finish_reason": "STOP"}]}
-{"candidates": [{"content": {"parts": [{"text": "never reached"}]}, "finish_reason": "STOP"}]}

@@ -66,7 +66,8 @@ turn/end
 ```
 
 - Steering: Enter while running injects a message after the current tool and drops the
-  remaining calls of that assistant turn. Ctrl+C aborts the run and returns queued input.
+  remaining calls of that assistant turn. Ctrl+C aborts the run, kills the command that is
+  in flight (exit -1, `killed by user`), and returns queued input.
 - Prompt: built-in section of about 30 lines, plus `AGENTS.md` from the cwd and parent dirs.
   No plan mode, no sub-agents, no permission popups, no built-in to-dos.
 

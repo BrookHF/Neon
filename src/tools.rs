@@ -3,6 +3,7 @@
 use std::io::Read as _;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -22,6 +23,8 @@ pub struct ToolCtx {
     pub timeout_secs: u64,
     pub excerpt_bytes: usize,
     pub spill_dir: PathBuf,
+    /// Set by Ctrl+C. A tool that waits should kill its child and return early.
+    pub abort: Arc<AtomicBool>,
 }
 
 pub struct ToolResult {
@@ -251,10 +254,17 @@ impl Tool for BashTool {
 
         let deadline = Instant::now() + Duration::from_secs(timeout);
         let mut timed_out = false;
+        let mut killed_by_user = false;
         let code = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break status.code().unwrap_or(-1),
                 Ok(None) => {
+                    if ctx.abort.load(Ordering::Relaxed) {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        killed_by_user = true;
+                        break -1;
+                    }
                     if Instant::now() >= deadline {
                         let _ = child.kill();
                         let _ = child.wait();
@@ -277,6 +287,9 @@ impl Tool for BashTool {
 
         let mut content = String::new();
         content.push_str(&format!("exit: {code}\n"));
+        if killed_by_user {
+            content.push_str("killed by user (Ctrl+C)\n");
+        }
         if timed_out {
             content.push_str(&format!("timed out after {timeout}s\n"));
         }
@@ -292,7 +305,7 @@ impl Tool for BashTool {
 
         ToolResult {
             content,
-            is_error: timed_out || code != 0,
+            is_error: killed_by_user || timed_out || code != 0,
         }
     }
 }
@@ -333,7 +346,37 @@ mod tests {
             timeout_secs: 10,
             excerpt_bytes: 512,
             spill_dir: dir.join("spill"),
+            abort: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    #[test]
+    fn abort_kills_a_running_command() {
+        let dir = std::path::PathBuf::from("/tmp/neon-test-abort");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let registry = Registry::default();
+        registry.add(Box::new(BashTool), PluginRow::Core);
+        let call = ToolCall {
+            id: "ab".to_string(),
+            name: "bash".to_string(),
+            args: json!({ "command": "sleep 5 && echo late" }),
+            thought_sig: None,
+        };
+        let mut ctx = ctx(&dir);
+        ctx.abort = Arc::new(AtomicBool::new(false));
+        let flag = ctx.abort.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            flag.store(true, Ordering::Relaxed);
+        });
+        let started = Instant::now();
+        let result = registry.execute(&call, &ctx);
+        let elapsed = started.elapsed();
+        assert!(result.is_error);
+        assert!(result.content.contains("killed by user"));
+        assert!(!result.content.contains("late"));
+        assert!(elapsed < Duration::from_secs(3), "child was not killed: {elapsed:?}");
     }
 
     #[test]

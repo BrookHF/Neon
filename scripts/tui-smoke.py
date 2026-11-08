@@ -160,6 +160,7 @@ def main():
     s, rc = screen(["--fixture", slow], [(b"go\r", 0.2), (b"\x03", 1.0)], 3.0)
     n = norm(s)
     results.append(("abort note shown", "#aborted" in n))
+    results.append(("abort killed the in-flight tool", "exit:-1" in n and "[error]" in n))
     results.append(("abort dropped later calls", "echob" not in n))
     os.remove(slow)
 

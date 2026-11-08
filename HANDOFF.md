@@ -73,7 +73,9 @@ and the plain REPL on this phone with nothing installed.
 - Two event dispatch modes only: `emit` (observe) and `waterfall` (around-middleware). The
   tool pipeline already takes waterfall interceptors: `Registry::add_interceptor`.
 - Steering: Enter (carriage return) lands after the tool in flight; calls still owed are
-  dropped, so no call goes unanswered. Controls reset at the **end** of a turn, not the start.
+  dropped, so no call goes unanswered. Ctrl+C aborts the run and kills the in-flight bash
+  child (exit -1, `killed by user`; `ToolCtx.abort` shares the switch with the tool).
+  Controls reset at the **end** of a turn, not the start.
 - Plugin swaps take effect at the turn boundary, never mid-request.
 
 ## Milestone 3: WASM plugins — done

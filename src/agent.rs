@@ -92,7 +92,8 @@ impl Sink for VecSink {
 #[derive(Default)]
 pub struct Controls {
     inbox: Mutex<Vec<String>>,
-    abort: AtomicBool,
+    /// Shared with ToolCtx so a waiting tool can kill its child on Ctrl+C.
+    abort: Arc<AtomicBool>,
 }
 
 impl Controls {
@@ -110,6 +111,11 @@ impl Controls {
 
     pub fn aborted(&self) -> bool {
         self.abort.load(Ordering::Relaxed)
+    }
+
+    /// The abort switch, shared with `ToolCtx` so a waiting tool kills its child.
+    pub fn abort_flag(&self) -> Arc<AtomicBool> {
+        self.abort.clone()
     }
 
     pub fn reset(&self) {
@@ -230,6 +236,7 @@ impl Agent {
             timeout_secs: self.cfg.bash_timeout_secs,
             excerpt_bytes: self.cfg.bash_excerpt_bytes,
             spill_dir: self.cfg.spill_dir.clone(),
+            abort: self.controls.abort_flag(),
         };
 
         let mut steps = 0usize;

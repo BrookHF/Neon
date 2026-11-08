@@ -45,6 +45,7 @@ fn harness(
             timeout_secs: cfg.bash_timeout_secs,
             excerpt_bytes: cfg.bash_excerpt_bytes,
             spill_dir: cfg.spill_dir.clone(),
+            abort: controls.abort_flag(),
         }),
         Arc::new(|_line: &str| {}),
     )));
@@ -142,6 +143,52 @@ fn stops_at_the_step_limit() {
     assert!(outcome.stopped_at_limit);
     assert_eq!(outcome.steps, 3);
     assert_eq!(history.len(), 7);
+}
+
+#[test]
+fn abort_mid_tool_kills_the_child_and_ends_the_turn() {
+    // One long bash call, then a step that must never be requested.
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join("midabort-tmp.jsonl");
+    std::fs::write(
+        &path,
+        serde_json::to_string(&serde_json::json!({
+            "candidates": [{ "content": { "parts": [
+                { "functionCall": { "name": "bash", "args": { "command": "sleep 4 && echo late" } } }
+            ] }, "finish_reason": "STOP" }] 
+        }))
+        .unwrap()
+        + "\n" + &serde_json::to_string(&serde_json::json!({
+            "candidates": [{ "content": { "parts": [{ "text": "never reached" }] }, "finish_reason": "STOP" }] 
+        }))
+        .unwrap() + "\n",
+    )
+    .unwrap();
+
+    let (agent, sink, controls, _dir, _log) = harness("midabort", "midabort-tmp.jsonl", 24, 200_000);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        controls.abort();
+    });
+    let started = std::time::Instant::now();
+    let mut history = vec![Message::user("take your time")];
+    let outcome = agent.run_turn(&mut history).unwrap();
+    let elapsed = started.elapsed();
+    std::fs::remove_file(&path).ok();
+
+    assert!(outcome.aborted);
+    assert_eq!(outcome.steps, 1);
+    assert!(elapsed < std::time::Duration::from_secs(3), "child was not killed: {elapsed:?}");
+    assert!(sink.dump().contains("[aborted]"));
+
+    // The result carries the kill note, and the child never printed "late".
+    let content = match &history[2].parts[0] {
+        Part::Result { content, .. } => content.clone(),
+        other => panic!("expected a tool result, got {other:?}"),
+    };
+    assert!(content.contains("killed by user"));
+    assert!(!content.contains("late"));
 }
 
 #[test]

@@ -217,6 +217,7 @@ fn main() -> ExitCode {
 
     let registry = Registry::new();
     registry.add(Box::new(BashTool), PluginRow::Core);
+    let controls = Arc::new(Controls::default());
 
     let plugins = Arc::new(Mutex::new(PluginHost::new(
         Arc::new(neon::tools::ToolCtx {
@@ -224,6 +225,7 @@ fn main() -> ExitCode {
             timeout_secs: cfg.bash_timeout_secs,
             excerpt_bytes: cfg.bash_excerpt_bytes,
             spill_dir: cfg.spill_dir.clone(),
+            abort: controls.abort_flag(),
         }),
         Arc::new(|line: &str| eprintln!("[plugin] {line}")),
     )));
@@ -240,7 +242,6 @@ fn main() -> ExitCode {
         }
     }
 
-    let controls = Arc::new(Controls::default());
     let history = Arc::new(Mutex::new(history));
     let cfg = Arc::new(cfg);
 
