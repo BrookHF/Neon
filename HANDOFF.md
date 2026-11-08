@@ -146,6 +146,12 @@ RUST_MIN_STACK = "8000000"` is committed for tests and UI worker threads.
   `MAX_TOKENS` finish becomes a visible note in the loop. Requests now send
   `maxOutputTokens` from `max_tokens` in config.yaml (default 16000). Without it, the API
   default cap silently stops a large tool call (a whole HTML file) mid-intent.
+- Gemini can stall mid-stream: intro text, then silence, with keepalive bytes that reset
+  the socket timeout. The idle guard measures time since the last `data:` line
+  (`stream_idle_secs`, default 180) and fails loudly; a stall before any data retries.
+  Live finding: `gemini-3.5-flash-lite` reliably stalls on one huge write (snake HTML);
+  small writes work. `gemini-3.5-flash` is the bet for large single-file writes.
+- Debug: `NEON_WIRE_DUMP=/path` appends every SSE payload line (never the key).
 - Gemini thinking models attach `thoughtSignature` to functionCall parts (a sibling of
   `functionCall` on the part). The next request must echo it back as `thought_signature`, or
   the follow-up request is rejected with HTTP 400 "Function call is missing a
