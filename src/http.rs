@@ -144,7 +144,7 @@ fn request(method: &str, url: &str, headers: &[(&str, &str)], body: &[u8]) -> Re
     // or a server that closes without answering). Nothing was processed yet, so retrying
     // the same request is safe. Failures after headers are not retried.
     let mut last_err = String::new();
-    for attempt in 1..=3 {
+    for _attempt in 1..=3 {
         let mut stream = match connect(&host, port, tls) {
             Ok(s) => s,
             Err(e) => {
