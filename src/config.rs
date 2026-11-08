@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use yaml_rust2::YamlLoader;
 
 use crate::error::{AgentError, Result};
-use crate::spill_dir;
+use crate::{sessions_dir, spill_dir};
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -18,6 +18,7 @@ pub struct Config {
     pub max_steps: usize,
     pub profile: String,
     pub spill_dir: PathBuf,
+    pub sessions_dir: PathBuf,
 }
 
 impl Default for Config {
@@ -32,6 +33,7 @@ impl Default for Config {
             max_steps: 24,
             profile: "default".to_string(),
             spill_dir: spill_dir(),
+            sessions_dir: sessions_dir(),
         }
     }
 }
@@ -87,6 +89,9 @@ impl Config {
         }
         if let Some(v) = doc["spill_dir"].as_str() {
             cfg.spill_dir = expand_home(v);
+        }
+        if let Some(v) = doc["sessions_dir"].as_str() {
+            cfg.sessions_dir = expand_home(v);
         }
         Ok(cfg)
     }

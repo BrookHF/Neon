@@ -24,14 +24,16 @@ A minimal coding agent in Rust, one binary, nothing installed to run it. One too
 ## Current state
 
 ```
-commits   ed6e474 milestone 1, c68f21b wire notes, 1c82cdf milestone 2
-files     src/{lib,main,agent,llm,http,tools,config,prompt,messages,error,ui}.rs (2297 lines)
-          fixtures/{demo,limit,steer}.jsonl   tests/loop.rs   scripts/tui-smoke.py
+commits   ed6e474 m1, c68f21b wire notes, 1c82cdf m2, ddf4e6b m3, (m4 pending hash)
+files     src/{lib,main,agent,llm,http,tools,config,prompt,messages,error,ui,plugin,profile,session}.rs (4081 lines)
+          fixtures/{demo,limit,steer,compact}.jsonl, fixtures/plugins/echo
+          tests/loop.rs   scripts/tui-smoke.py
 deps      serde, serde_json, rustls (ring provider), webpki-roots, yaml-rust2,
-          ratatui 0.30.2, crossterm 0.29.0
+          wasmi, ratatui 0.30.2, crossterm 0.29.0
 built     turn/step loop, bash tool with timeout + spill, Gemini SSE adapter, fixture adapter,
-          plain stdio REPL, ratatui TUI, steering, abort
-verified  17 cargo tests pass, 9 pty checks pass, all with no key and no network
+          plain stdio REPL, ratatui TUI, steering, abort, wasmi plugin loader + grants,
+          profiles/patches, hot swap, session log, --resume, compaction
+verified  31 cargo tests pass, 13 pty checks pass, all with no key and no network
 ```
 
 ## Commands
@@ -39,16 +41,28 @@ verified  17 cargo tests pass, 9 pty checks pass, all with no key and no network
 ```sh
 cd ~/src/neon
 ~/.cargo/bin/cargo build                      # dev build (glibc)
-~/.cargo/bin/cargo test                       # 17 tests, offline
+~/.cargo/bin/cargo test                       # 31 tests, offline
 python3 scripts/tui-smoke.py                  # drives the TUI on a pty, no key
 ~/.cargo/bin/cargo run -- --fixture fixtures/demo.jsonl -p "say hello"
+~/.cargo/bin/cargo run -- --fixture fixtures/demo.jsonl --resume last -p "more"
 ~/.cargo/bin/cargo run                        # TUI
 ~/.cargo/bin/cargo run -- --plain             # plain REPL
 ```
 
-Release target is still pending: `rustup target add aarch64-unknown-linux-musl`, then
-`cargo build --release --target aarch64-unknown-linux-musl`. Do it before claiming the
-"runs anywhere" goal is met.
+## Static musl release — done
+
+No musl-gcc exists here and apt cannot be used. ring's assembler needs no libc,
+so the host gcc works as the cross compiler:
+
+```sh
+~/.cargo/bin/rustup target add aarch64-unknown-linux-musl
+CC_aarch64_unknown_linux_musl=$(command -v gcc) \
+  ~/.cargo/bin/cargo build --release --target aarch64-unknown-linux-musl
+```
+
+Result: a statically linked 5.7 MB aarch64 binary (`file` reports "statically
+linked", `ldd` reports "not a dynamic executable"). It runs the fixture turn
+and the plain REPL on this phone with nothing installed.
 
 ## Architecture you must keep
 
@@ -85,14 +99,28 @@ allocator lives inside the plugin's own scratch array (`neon_scratch_base()`).
 The debug wasmi interpreter needs a deep host stack: `.cargo/config.toml [env]
 RUST_MIN_STACK = "8000000"` is committed for tests and UI worker threads.
 
-## Milestone 4: sessions and compaction (next work)
+## Milestone 4: sessions and compaction — done
 
-- Flat append-only JSONL at `~/.local/state/neon/sessions/<id>.jsonl`, entries `user`,
-  `assistant` (text + calls), `tool_result`, `model_change`, `compaction`, `meta`.
-- `neon --resume <id>|last` replays it.
-- Compaction: when the token estimate passes `context_budget_tokens` (default 200000), ask the
-  model to summarize the oldest span, insert a summary entry, keep originals in the log. The
-  loop currently errors at the budget with a message pointing here.
+- `src/session.rs`: append-only JSONL at `~/.local/state/neon/sessions/<id>.jsonl`.
+  Entry kinds `meta`, `user`, `assistant` (text + calls), `tool_result`, `model_change`,
+  `compaction`. Session id is hex-epoch-secs + pid + nonce.
+- `neon --resume <id>|last` replays the log and continues appending to the same file.
+  A resumed session keeps its `meta` model unless `--model` overrides it; an override
+  is recorded as a `model_change` entry.
+- Compaction: when `estimate_tokens` passes `context_budget_tokens`, keep the newest whole
+  messages that fit in 60% of the budget, ask `ctx.llm` to summarize the rest, replace the
+  span with one summary message, append a `compaction` entry; originals stay in the log.
+  Results whose call fell into the summarized span are stripped from the tail's first
+  message (they would be orphaned `functionResponse`s on the wire). Still over budget
+  after one compaction is an error.
+- Replay rebuilds the model-facing history: a `compaction` entry drops everything before
+  it and inserts the summary message.
+- `estimate_tokens` now counts tool results and call args, not just text.
+- Recording split: the CLI/REPL records the typed input message; the loop records every
+  message it pushes (`Agent::push`). `Agent.session` is `Option<Arc<Session>>`.
+- Fixed a milestone 2 bug: the TUI worker never pushed the typed message into history
+  (fixtures hid it because the fake adapter ignores the request). The worker now owns the
+  input string and pushes it under the history lock.
 
 ## Things already learned (do not rediscover)
 
@@ -134,4 +162,5 @@ line; only a human verifies.
 1. Confirm the exact Gemini model id. `gemini-3.5-flash-lite` is Fang's naming and has not been
    verified against the model list, because there is no key yet.
 2. Whether milestone 3 ships the `neon-plugin` author crate in the same repo or a sibling repo.
-3. When the static musl release should be built: before milestone 3 or after milestone 4.
+3. ~~When the static musl release should be built~~ — built after milestone 4; the
+   outcome is recorded under "Static musl release".

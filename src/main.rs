@@ -11,6 +11,7 @@ use neon::llm::{Adapter, FixtureAdapter, GeminiAdapter};
 use neon::messages::{Message, estimate_tokens};
 use neon::plugin::PluginHost;
 use neon::profile;
+use neon::session::{replay, resolve, Session};
 use neon::tools::{BashTool, PluginRow, Registry};
 use neon::ui;
 use neon::VERSION;
@@ -21,6 +22,7 @@ const HELP: &str = r#"neon - a minimal coding agent
   neon --plain            plain REPL, for pipes and dumb terminals
   neon -p "task"          run one task and exit
   neon --fixture f.jsonl  replay a recorded model stream, no key and no network
+  neon --resume <id>|last continue a saved session (~/.local/state/neon/sessions)
   neon --model <name>     override the model from config
   neon --profile <name>   plugin rows from ~/.config/neon/profiles/<name>.yaml
   neon --patch <file>     patch layer over the profile, last layer wins
@@ -35,6 +37,7 @@ Plain REPL commands: :tools, :model, :hist, :plugin <verb>, :quit
 struct Args {
     task: Option<String>,
     fixture: Option<PathBuf>,
+    resume: Option<String>,
     model: Option<String>,
     config: Option<PathBuf>,
     profile: Option<String>,
@@ -48,6 +51,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
     let mut a = Args {
         task: None,
         fixture: None,
+        resume: None,
         model: None,
         config: None,
         profile: None,
@@ -67,6 +71,11 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
             "--fixture" => {
                 let v = raw.get(i + 1).ok_or("--fixture needs a file")?;
                 a.fixture = Some(PathBuf::from(v));
+                i += 2;
+            }
+            "--resume" => {
+                let v = raw.get(i + 1).ok_or("--resume needs a session id or last")?;
+                a.resume = Some(v.clone());
                 i += 2;
             }
             "--model" => {
@@ -140,6 +149,61 @@ fn main() -> ExitCode {
         cfg.profile = p;
     }
 
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    // Session log: a new file, or resume an existing one. A resumed session keeps its
+    // model unless --model overrides it; an override is recorded as a model_change entry.
+    let mut history: Vec<Message> = Vec::new();
+    let resumed: Option<usize>;
+    let log: Arc<Session> = match &args.resume {
+        Some(target) => {
+            let id = match resolve(&cfg.sessions_dir, target) {
+                Ok(id) => id,
+                Err(e) => {
+                    eprintln!("neon: {e}");
+                    return ExitCode::from(8);
+                }
+            };
+            let (msgs, meta) = match replay(&cfg.sessions_dir.join(format!("{id}.jsonl"))) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("neon: {e}");
+                    return ExitCode::from(8);
+                }
+            };
+            let sess = Session::existing(&id, &cfg.sessions_dir);
+            let meta_model = meta
+                .as_ref()
+                .and_then(|m| m.get("model"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            if args.model.is_none() {
+                if let Some(m) = &meta_model {
+                    cfg.model = m.clone();
+                }
+            }
+            if meta_model.as_deref() != Some(cfg.model.as_str()) {
+                if let Err(e) = sess.record_model_change(&cfg.model) {
+                    eprintln!("neon: {e}");
+                    return ExitCode::from(8);
+                }
+            }
+            resumed = Some(msgs.len());
+            history = msgs;
+            Arc::new(sess)
+        }
+        None => {
+            resumed = None;
+            match Session::create(&cfg.sessions_dir, &cfg.model, &cwd) {
+                Ok(s) => Arc::new(s),
+                Err(e) => {
+                    eprintln!("neon: {e}");
+                    return ExitCode::from(8);
+                }
+            }
+        }
+    };
+
     let adapter: Arc<dyn Adapter> = match &args.fixture {
         Some(path) => match FixtureAdapter::from_file(path) {
             Ok(f) => Arc::new(f),
@@ -176,9 +240,8 @@ fn main() -> ExitCode {
         }
     }
 
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let controls = Arc::new(Controls::default());
-    let session: Arc<Mutex<Vec<Message>>> = Arc::new(Mutex::new(Vec::new()));
+    let history = Arc::new(Mutex::new(history));
     let cfg = Arc::new(cfg);
 
     if let Some(task) = args.task.clone() {
@@ -190,8 +253,14 @@ fn main() -> ExitCode {
             sink: Arc::new(StdioSink),
             controls,
             cwd,
+            session: Some(log.clone()),
         };
-        let mut history = vec![Message::user(&task)];
+        let msg = Message::user(&task);
+        if let Err(e) = log.record_message(&msg) {
+            eprintln!("neon: session log failed: {e}");
+        }
+        let mut history = history.lock().expect("history lock");
+        history.push(msg);
         match agent.run_turn(&mut history) {
             Ok(_) => return ExitCode::SUCCESS,
             Err(e) => {
@@ -208,13 +277,15 @@ fn main() -> ExitCode {
             plugins,
             cfg,
             controls,
-            session,
+            history,
+            log,
+            resumed,
             cwd,
             &config_path,
         );
     }
 
-    match ui::run(adapter, Arc::new(registry), plugins, cfg, session, controls, cwd) {
+    match ui::run(adapter, Arc::new(registry), plugins, cfg, history, controls, cwd, log, resumed) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("neon: the terminal failed: {e}");
@@ -230,7 +301,9 @@ fn plain_repl(
     plugins: Arc<Mutex<PluginHost>>,
     cfg: Arc<Config>,
     controls: Arc<Controls>,
-    session: Arc<Mutex<Vec<Message>>>,
+    history: Arc<Mutex<Vec<Message>>>,
+    log: Arc<Session>,
+    resumed: Option<usize>,
     cwd: PathBuf,
     config_path: &std::path::Path,
 ) -> ExitCode {
@@ -242,9 +315,13 @@ fn plain_repl(
         sink: Arc::new(StdioSink),
         controls,
         cwd: cwd.clone(),
+        session: Some(log.clone()),
     };
 
-    println!("neon {VERSION} · model {} · folder {}", cfg.model, cwd.display());
+    println!("neon {VERSION} · model {} · folder {} · session {}", cfg.model, cwd.display(), log.id);
+    if let Some(n) = resumed {
+        println!("resumed {n} messages");
+    }
     println!("Type a task. :quit to leave. Ctrl+C leaves too.");
 
     let stdin_handle = stdin();
@@ -273,11 +350,12 @@ fn plain_repl(
                 continue;
             }
             ":hist" => {
-                let history = session.lock().expect("session lock");
+                let hist = history.lock().expect("session lock");
                 println!(
-                    "{} messages, about {} tokens",
-                    history.len(),
-                    estimate_tokens(&history)
+                    "{} messages, about {} tokens, logged in {}",
+                    hist.len(),
+                    estimate_tokens(&hist),
+                    log.path.display()
                 );
                 continue;
             }
@@ -296,10 +374,14 @@ fn plain_repl(
             }
             _ => {}
         }
+        let msg = Message::user(&input);
+        if let Err(e) = log.record_message(&msg) {
+            eprintln!("[session log failed: {e}]");
+        }
         {
-            let mut history = session.lock().expect("session lock");
-            history.push(Message::user(&input));
-            if let Err(e) = agent.run_turn(&mut history) {
+            let mut hist = history.lock().expect("session lock");
+            hist.push(msg);
+            if let Err(e) = agent.run_turn(&mut hist) {
                 eprintln!("[error: {e}]");
             }
         }

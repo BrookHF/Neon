@@ -5,8 +5,9 @@ use std::sync::Arc;
 use neon::agent::{Agent, Controls, VecSink};
 use neon::config::Config;
 use neon::llm::FixtureAdapter;
-use neon::messages::{Message, Part, Role};
+use neon::messages::{Message, Part, Role, estimate_tokens};
 use neon::plugin::PluginHost;
+use neon::session::Session;
 use neon::tools::{BashTool, PluginRow, Registry, ToolCtx};
 
 fn fixture(name: &str) -> std::path::PathBuf {
@@ -26,11 +27,14 @@ fn harness(
     name: &str,
     fixture_name: &str,
     max_steps: usize,
-) -> (Agent, Arc<VecSink>, Arc<Controls>, std::path::PathBuf) {
+    budget: usize,
+) -> (Agent, Arc<VecSink>, Arc<Controls>, std::path::PathBuf, Arc<Session>) {
     let dir = workdir(name);
     let mut cfg = Config::default();
     cfg.spill_dir = dir.join("spill");
     cfg.max_steps = max_steps;
+    cfg.context_budget_tokens = budget;
+    cfg.sessions_dir = dir.join("sessions");
     let registry = Registry::new();
     registry.add(Box::new(BashTool), PluginRow::Core);
     let sink = Arc::new(VecSink::default());
@@ -44,6 +48,7 @@ fn harness(
         }),
         Arc::new(|_line: &str| {}),
     )));
+    let session = Arc::new(Session::create(&cfg.sessions_dir, &cfg.model, &dir).unwrap());
     let agent = Agent {
         adapter: Arc::new(FixtureAdapter::from_file(&fixture(fixture_name)).unwrap()),
         registry: Arc::new(registry),
@@ -52,13 +57,14 @@ fn harness(
         sink: sink.clone(),
         controls: controls.clone(),
         cwd: dir.clone(),
+        session: Some(session.clone()),
     };
-    (agent, sink, controls, dir)
+    (agent, sink, controls, dir, session)
 }
 
 #[test]
 fn replays_a_tool_turn() {
-    let (agent, sink, _controls, dir) = harness("turn", "demo.jsonl", 24);
+    let (agent, sink, _controls, dir, _log) = harness("turn", "demo.jsonl", 24, 200_000);
     let mut history = vec![Message::user("say hello")];
     let outcome = agent.run_turn(&mut history).unwrap();
 
@@ -93,7 +99,7 @@ fn replays_a_tool_turn() {
 
 #[test]
 fn steering_lands_after_the_tool_and_drops_the_rest() {
-    let (agent, _sink, controls, _dir) = harness("steer", "steer.jsonl", 24);
+    let (agent, _sink, controls, _dir, _log) = harness("steer", "steer.jsonl", 24, 200_000);
     controls.steer("stop after one");
     let mut history = vec![Message::user("run three commands")];
     let outcome = agent.run_turn(&mut history).unwrap();
@@ -117,7 +123,7 @@ fn steering_lands_after_the_tool_and_drops_the_rest() {
 
 #[test]
 fn abort_before_a_step_ends_the_turn() {
-    let (agent, _sink, controls, _dir) = harness("abort", "limit.jsonl", 24);
+    let (agent, _sink, controls, _dir, _log) = harness("abort", "limit.jsonl", 24, 200_000);
     controls.abort();
     let mut history = vec![Message::user("keep going")];
     let outcome = agent.run_turn(&mut history).unwrap();
@@ -129,11 +135,80 @@ fn abort_before_a_step_ends_the_turn() {
 
 #[test]
 fn stops_at_the_step_limit() {
-    let (agent, _sink, _controls, _dir) = harness("limit", "limit.jsonl", 3);
+    let (agent, _sink, _controls, _dir, _log) = harness("limit", "limit.jsonl", 3, 200_000);
     let mut history = vec![Message::user("keep going")];
     let outcome = agent.run_turn(&mut history).unwrap();
 
     assert!(outcome.stopped_at_limit);
     assert_eq!(outcome.steps, 3);
     assert_eq!(history.len(), 7);
+}
+
+#[test]
+fn compaction_summarizes_the_oldest_span_and_keeps_originals_in_the_log() {
+    let (agent, sink, _controls, dir, log) = harness("compact", "compact.jsonl", 24, 100);
+    log.record_message(&Message::user("print a long list")).unwrap();
+    let mut history = vec![Message::user("print a long list")];
+    let outcome = agent.run_turn(&mut history).unwrap();
+
+    assert_eq!(outcome.steps, 2);
+    assert!(!outcome.aborted);
+    assert_eq!(outcome.text, "Done, the numbers were summarized.");
+
+    // Model-facing history: summary message plus the final answer. The big tool
+    // result is gone from the context and under the budget.
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].role, Role::User);
+    assert!(history[0].text().contains("compacted"));
+    assert!(history[0].text().contains("seq 1 2000"));
+    assert!(estimate_tokens(&history) <= 100);
+    assert!(sink.dump().contains("[context compacted]"));
+
+    // The log keeps every original entry plus the compaction entry.
+    let log_path = std::fs::read_dir(dir.join("sessions"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let raw = std::fs::read_to_string(&log_path).unwrap();
+    assert!(raw.contains("\"k\":\"meta\""));
+    assert!(raw.contains("\"k\":\"user\""));
+    assert!(raw.contains("\"k\":\"assistant\""));
+    assert!(raw.contains("\"k\":\"tool_result\""));
+    assert!(raw.contains("\"k\":\"compaction\""));
+    assert!(raw.contains("1 through 2000"));
+}
+
+#[test]
+fn resumed_session_appends_after_replay() {
+    let (agent, _sink, _controls, dir, log) = harness("resume", "demo.jsonl", 24, 200_000);
+    log.record_message(&Message::user("say hello")).unwrap();
+    let mut history = vec![Message::user("say hello")];
+    agent.run_turn(&mut history).unwrap();
+    let session_file = std::fs::read_dir(dir.join("sessions"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let id = session_file
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .strip_suffix(".jsonl")
+        .unwrap()
+        .to_string();
+
+    // Replay the finished session; it rebuilds the four-message history.
+    let (msgs, meta) = neon::session::replay(&session_file).unwrap();
+    assert_eq!(meta.as_ref().unwrap()["k"], "meta");
+    assert_eq!(msgs.len(), 4);
+
+    // A resumed handle appends to the same file; replay shows both turns.
+    let sess = neon::session::Session::existing(&id, &dir.join("sessions"));
+    sess.record_message(&Message::user("and again")).unwrap();
+    let (msgs2, _) = neon::session::replay(&session_file).unwrap();
+    assert_eq!(msgs2.len(), 5);
+    assert_eq!(msgs2[4].text(), "and again");
 }

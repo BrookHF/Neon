@@ -93,7 +93,18 @@ pub enum Event {
     Error(String),
 }
 
-/// Rough token estimate: 4 characters per token. Good enough for a budget check.
+/// Rough token estimate: 4 characters per token. Counts text, tool results, and call
+/// args, so a big tool payload is visible to the budget check and to compaction.
 pub fn estimate_tokens(messages: &[Message]) -> usize {
-    messages.iter().map(|m| m.text().len() / 4).sum()
+    let mut chars = 0usize;
+    for m in messages {
+        for p in &m.parts {
+            match p {
+                Part::Text(t) => chars += t.len(),
+                Part::Call(c) => chars += c.name.len() + c.args.to_string().len(),
+                Part::Result { content, .. } => chars += content.len(),
+            }
+        }
+    }
+    chars / 4
 }

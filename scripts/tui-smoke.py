@@ -20,6 +20,13 @@ import fcntl
 ESC = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.path.join(REPO, "target", "debug", "neon")
+SESSIONS = os.path.join(os.path.expanduser("~"), ".local", "state", "neon", "sessions")
+
+
+def session_files():
+    if not os.path.isdir(SESSIONS):
+        return set()
+    return {f for f in os.listdir(SESSIONS) if f.endswith(".jsonl")}
 
 
 def chunk(parts, finish="STOP"):
@@ -75,12 +82,36 @@ def norm(text):
 
 def main():
     results = []
+    before = session_files()
 
     s, rc = screen(["--fixture", "fixtures/demo.jsonl"], [(b"say hello\r", 0.2)], 2.5)
     n = norm(s)
     results.append(("turn renders cards", "echohellofromneon" in n and "->bash" in n))
     results.append(("reply shown", "Itprintedhellofromneon" in n))
     results.append(("status bar", "tok" in n and "2steps" in n))
+
+    # The turn appended a JSONL session log: meta, user, assistant, tool_result.
+    logged = False
+    for f in session_files() - before:
+        text = open(os.path.join(SESSIONS, f)).read()
+        logged = logged or (
+            '"k":"meta"' in text
+            and '"k":"user"' in text
+            and '"k":"assistant"' in text
+            and '"k":"tool_result"' in text
+        )
+    results.append(("session logged", logged))
+
+    # --resume replays the log before the new turn starts.
+    s, rc = screen(
+        ["--fixture", "fixtures/demo.jsonl", "--resume", "last"],
+        [(b"say hello\r", 0.2)],
+        2.5,
+    )
+    n = norm(s)
+    results.append(
+        ("resume replays history", "resumed4messages" in n and "Itprintedhellofromneon" in n)
+    )
 
     # Profile rows load at the turn boundary; /plugin list shows them after the turn.
     profiles = os.path.join(os.path.expanduser("~"), ".config", "neon", "profiles")
@@ -138,6 +169,8 @@ def main():
         if not ok:
             failed += 1
             print(f"  screen tail: {norm(s)[-300:]}")
+    for f in session_files() - before:
+        os.remove(os.path.join(SESSIONS, f))
     print("all checks passed" if failed == 0 else f"{failed} check(s) failed")
     return 1 if failed else 0
 

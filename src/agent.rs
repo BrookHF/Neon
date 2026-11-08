@@ -13,6 +13,7 @@ use crate::llm::Adapter;
 use crate::messages::{Event, Message, Part, Request, Role, ToolCall, estimate_tokens};
 use crate::plugin::PluginHost;
 use crate::prompt::build_system;
+use crate::session::{summary_message, Session};
 use crate::tools::{Registry, ToolCtx, ToolResult};
 
 /// Where the loop reports progress. Plain stdio, the TUI, or a test buffer.
@@ -135,6 +136,8 @@ pub struct Agent {
     pub sink: Arc<dyn Sink>,
     pub controls: Arc<Controls>,
     pub cwd: PathBuf,
+    /// The append-only session log this turn appends to. None for bare loop tests.
+    pub session: Option<Arc<Session>>,
 }
 
 impl Agent {
@@ -149,6 +152,76 @@ impl Agent {
         // Leftover steering and the abort switch belong to the turn that just ended.
         self.controls.reset();
         outcome
+    }
+
+    /// Push a message to the history and append its entries to the session log.
+    fn push(&self, history: &mut Vec<Message>, msg: Message) {
+        if let Some(s) = &self.session {
+            if let Err(e) = s.record_message(&msg) {
+                self.sink.note(&format!("session log failed: {e}"));
+            }
+        }
+        history.push(msg);
+    }
+
+    /// Ask the model to summarize the oldest span so the history fits the budget again.
+    /// The summary replaces the span in the model-facing history; originals stay in the log.
+    /// Returns true when the history was rewritten.
+    fn compact(&self, history: &mut Vec<Message>) -> Result<bool> {
+        let keep = self.cfg.context_budget_tokens * 3 / 5;
+
+        // Keep the newest whole messages that fit; a call and its results stay together.
+        let mut split = history.len();
+        let mut tail_tokens = 0usize;
+        while split > 0 {
+            let size = estimate_tokens(&history[split - 1..split]);
+            if tail_tokens + size > keep {
+                break;
+            }
+            tail_tokens += size;
+            split -= 1;
+        }
+        if split == 0 {
+            return Ok(false); // everything fits; nothing worth summarizing
+        }
+
+        let mut tail = history.split_off(split);
+        // A result whose call fell into the summarized span is invalid on the wire;
+        // the summary covers it, so strip those parts from the tail's first message.
+        if let Some(first) = tail.first_mut() {
+            first.parts.retain(|p| !matches!(p, Part::Result { .. }));
+            if first.parts.is_empty() {
+                tail.remove(0);
+            }
+        }
+
+        let request = Request {
+            system: COMPACT_SYSTEM.to_string(),
+            messages: history.clone(),
+            tools: Vec::new(),
+            model: self.cfg.model.clone(),
+            temperature: None,
+            max_tokens: None,
+        };
+        let mut summary = String::new();
+        self.adapter.stream(&request, &mut |event| {
+            if let Event::Delta(chunk) = event {
+                summary.push_str(&chunk);
+            }
+        })?;
+        let summary = summary.trim().to_string();
+        if summary.is_empty() {
+            return Err(AgentError::Adapter("compaction returned no summary".to_string()));
+        }
+
+        let replaced = history.len();
+        history.clear();
+        history.push(summary_message(&summary));
+        history.extend(tail);
+        if let Some(s) = &self.session {
+            s.record_compaction(&summary, replaced)?;
+        }
+        Ok(true)
     }
 
     fn run_inner(&self, history: &mut Vec<Message>) -> Result<TurnOutcome> {
@@ -173,10 +246,15 @@ impl Agent {
                 });
             }
             if estimate_tokens(history) > self.cfg.context_budget_tokens {
-                return Err(AgentError::Adapter(format!(
-                    "context budget of {} tokens exceeded. Compaction arrives in milestone 4.",
-                    self.cfg.context_budget_tokens
-                )));
+                if self.compact(history)? {
+                    self.sink.note("context compacted");
+                }
+                if estimate_tokens(history) > self.cfg.context_budget_tokens {
+                    return Err(AgentError::Adapter(format!(
+                        "context still over the {} token budget after compaction",
+                        self.cfg.context_budget_tokens
+                    )));
+                }
             }
             steps += 1;
 
@@ -205,7 +283,7 @@ impl Agent {
             })?;
 
             if calls.is_empty() {
-                history.push(Message {
+                self.push(history, Message {
                     role: Role::Assistant,
                     parts: vec![Part::Text(text.clone())],
                 });
@@ -249,7 +327,7 @@ impl Agent {
             for (call, _) in &executed {
                 parts.push(Part::Call(call.clone()));
             }
-            history.push(Message {
+            self.push(history, Message {
                 role: Role::Assistant,
                 parts,
             });
@@ -267,7 +345,7 @@ impl Agent {
                 if let Some(msg) = &steering {
                     results.push(Part::Text(msg.clone()));
                 }
-                history.push(Message {
+                self.push(history, Message {
                     role: Role::User,
                     parts: results,
                 });
@@ -291,6 +369,9 @@ impl Agent {
         })
     }
 }
+
+/// Instruction for the compaction request.
+const COMPACT_SYSTEM: &str = "You compact an agent conversation. Summarize the messages above in plain text: what the user asked, what was done, tool results that matter, decisions made, and where the work stands. Keep it under 200 words.";
 
 fn compact(value: &Value) -> String {
     let text = value.to_string();

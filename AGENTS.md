@@ -13,6 +13,8 @@ cargo run                        # interactive TUI
 sh ~/src/neon-plugin/scripts/build.sh  # rebuild fixtures/plugins wasm (wasm32 target)
 rustup target add aarch64-unknown-linux-musl
 cargo build --release --target aarch64-unknown-linux-musl   # portable static release
+# no musl-gcc here (no apt); ring's asm needs no libc, so host gcc works as cross CC:
+# CC_aarch64_unknown_linux_musl=$(command -v gcc) cargo build --release --target aarch64-unknown-linux-musl
 ```
 
 No root is available in this environment. Never use `apt`; rustup lives in `~/.cargo`.

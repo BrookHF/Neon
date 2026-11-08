@@ -20,6 +20,7 @@ use crate::config::Config;
 use crate::llm::Adapter;
 use crate::messages::{Message, ToolCall, estimate_tokens};
 use crate::plugin::PluginHost;
+use crate::session::Session;
 use crate::tools::{Registry, ToolResult};
 
 #[derive(Clone, Debug)]
@@ -184,9 +185,11 @@ pub fn run(
     registry: Arc<Registry>,
     plugins: Arc<Mutex<PluginHost>>,
     cfg: Arc<Config>,
-    session: Arc<Mutex<Vec<Message>>>,
+    history: Arc<Mutex<Vec<Message>>>,
     controls: Arc<Controls>,
     cwd: PathBuf,
+    log: Arc<Session>,
+    resumed: Option<usize>,
 ) -> IoResult<()> {
     enable_raw_mode()?;
     crossterm::execute!(stdout(), EnterAlternateScreen)?;
@@ -198,6 +201,10 @@ pub fn run(
         cfg.model,
         registry.schemas().len()
     )));
+    shared.push(Row::Note(format!("session {}", log.id)));
+    if let Some(n) = resumed {
+        shared.push(Row::Note(format!("resumed {n} messages")));
+    }
 
     let mut input = String::new();
     loop {
@@ -245,10 +252,12 @@ pub fn run(
                                 registry: registry.clone(),
                                 plugins: plugins.clone(),
                                 cfg: cfg.clone(),
-                                session: session.clone(),
+                                history: history.clone(),
+                                log: log.clone(),
                                 controls: controls.clone(),
                                 shared: shared.clone(),
                                 cwd: cwd.clone(),
+                                input: msg,
                             };
                             thread::spawn(move || worker.turn());
                         }
@@ -276,10 +285,13 @@ struct Worker {
     registry: Arc<Registry>,
     plugins: Arc<Mutex<PluginHost>>,
     cfg: Arc<Config>,
-    session: Arc<Mutex<Vec<Message>>>,
+    history: Arc<Mutex<Vec<Message>>>,
+    log: Arc<Session>,
     controls: Arc<Controls>,
     shared: Arc<Shared>,
     cwd: PathBuf,
+    /// The typed message for this turn. The UI thread does not touch the history.
+    input: String,
 }
 
 impl Worker {
@@ -295,8 +307,15 @@ impl Worker {
             sink,
             controls: self.controls.clone(),
             cwd: self.cwd.clone(),
+            session: Some(self.log.clone()),
         };
-        let mut history = self.session.lock().expect("session lock");
+        let mut history = self.history.lock().expect("history lock");
+        // The UI thread only drew the transcript row; the message enters history here.
+        let msg = Message::user(&self.input);
+        if let Err(e) = self.log.record_message(&msg) {
+            self.shared.push(Row::Note(format!("session log failed: {e}")));
+        }
+        history.push(msg);
         let outcome = agent.run_turn(&mut history);
         self.shared
             .tokens
