@@ -1,2 +1,3 @@
 /target
 *.log
+/rust_out
