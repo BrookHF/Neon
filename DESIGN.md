@@ -81,6 +81,9 @@ Native wire format, not the OpenAI-compatible one.
   optional `generationConfig.thinkingConfig`.
 - Default model: `gemini-3.5-flash-lite`. Key comes from `~/.config/neon/config.yaml` only,
   never from the environment.
+- Transient failures (429/5xx, transport drops before headers, empty streams) retry with
+  progressive waits: 1s, 2s, 4s, capped at 30s, up to `llm_retries` attempts (default 3).
+  Only retried while nothing has been emitted yet, so streamed text is never duplicated.
 - Adapter is a trait: `fn stream(&[Message], &[ToolSchema], &ModelOpts) -> impl Stream<Item = Event>`.
   A second provider becomes a config row or plugin later.
 

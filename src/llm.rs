@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -23,11 +24,9 @@ impl GeminiAdapter {
     pub fn new(cfg: Config) -> Self {
         GeminiAdapter { cfg }
     }
-}
 
-impl Adapter for GeminiAdapter {
-    fn stream(&self, req: &Request, sink: &mut dyn FnMut(Event)) -> Result<()> {
-        let key = self.cfg.require_key()?;
+    /// One request attempt. Errors say whether waiting and retrying could help.
+    fn stream_once(&self, key: &str, req: &Request, sink: &mut dyn FnMut(Event)) -> Result<()> {
         let url = format!(
             "{}/v1beta/models/{}:streamGenerateContent?alt=sse",
             self.cfg.base_url, req.model
@@ -38,7 +37,7 @@ impl Adapter for GeminiAdapter {
         let mut resp = http::post(
             &url,
             &[
-                ("x-goog-api-key", &key),
+                ("x-goog-api-key", key),
                 ("content-type", "application/json"),
                 ("accept", "text/event-stream"),
             ],
@@ -47,11 +46,13 @@ impl Adapter for GeminiAdapter {
 
         if resp.status != 200 {
             let bytes = http::read_all(&mut resp.body);
-            return Err(AgentError::Adapter(format!(
-                "HTTP {}: {}",
-                resp.status,
-                String::from_utf8_lossy(&bytes)
-            )));
+            let text = String::from_utf8_lossy(&bytes);
+            let retryable = matches!(resp.status, 429 | 500 | 502 | 503 | 504);
+            let msg = format!("HTTP {}: {}", resp.status, text);
+            if retryable {
+                return Err(AgentError::Retryable(msg));
+            }
+            return Err(AgentError::Adapter(msg));
         }
 
         let mut call_index = 0usize;
@@ -86,11 +87,40 @@ impl Adapter for GeminiAdapter {
             return Err(AgentError::Adapter(msg));
         }
         if !saw_any {
-            return Err(AgentError::Adapter(
+            // An empty stream (bad close, server hiccup) is worth waiting for.
+            return Err(AgentError::Retryable(
                 io_error.unwrap_or_else(|| "the stream returned no candidates".to_string()),
             ));
         }
         Ok(())
+    }
+}
+
+impl Adapter for GeminiAdapter {
+    /// Retries transient failures with progressive waits: 1s, 2s, 4s, capped at 30s.
+    /// A retry only happens if no event was emitted yet, so text is never duplicated.
+    fn stream(&self, req: &Request, sink: &mut dyn FnMut(Event)) -> Result<()> {
+        let key = self.cfg.require_key()?;
+        let mut delay = Duration::from_secs(1);
+        for attempt in 1..=self.cfg.llm_retries {
+            let mut emitted = false;
+            let result = self.stream_once(&key, req, &mut |event| {
+                emitted = true;
+                sink(event);
+            });
+            match result {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    let transient = matches!(&e, AgentError::Retryable(_) | AgentError::Http(_));
+                    if attempt == self.cfg.llm_retries || emitted || !transient {
+                        return Err(e);
+                    }
+                    std::thread::sleep(delay);
+                    delay = (delay * 2).min(Duration::from_secs(30));
+                }
+            }
+        }
+        Err(AgentError::Adapter("retry loop ended".to_string()))
     }
 }
 

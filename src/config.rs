@@ -16,6 +16,7 @@ pub struct Config {
     pub bash_timeout_secs: u64,
     pub bash_excerpt_bytes: usize,
     pub max_steps: usize,
+    pub llm_retries: usize,
     pub profile: String,
     pub spill_dir: PathBuf,
     pub sessions_dir: PathBuf,
@@ -31,6 +32,7 @@ impl Default for Config {
             bash_timeout_secs: 120,
             bash_excerpt_bytes: 16_384,
             max_steps: 24,
+            llm_retries: 3,
             profile: "default".to_string(),
             spill_dir: spill_dir(),
             sessions_dir: sessions_dir(),
@@ -83,6 +85,9 @@ impl Config {
         }
         if let Some(v) = doc["max_steps"].as_i64() {
             cfg.max_steps = v.max(1) as usize;
+        }
+        if let Some(v) = doc["llm_retries"].as_i64() {
+            cfg.llm_retries = v.max(1) as usize;
         }
         if let Some(v) = doc["profile"].as_str() {
             cfg.profile = v.to_string();

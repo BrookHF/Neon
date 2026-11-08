@@ -134,8 +134,14 @@ RUST_MIN_STACK = "8000000"` is committed for tests and UI worker threads.
 
 - Gemini v1beta: the prompt field is `systemInstruction`, not `system`; `additionalProperties`
   is rejected in a function declaration schema; schema `type` values must be upper case.
-- Gemini can close a stream without a TLS `close_notify`. Treat a bad close as end of body:
-  `http::read_all` and `http::each_line` keep whatever arrived.
+- Gemini can close a stream without a TLS `close_notify`. In rustls 0.23 that surfaces as
+  `reader().read()` returning `WouldBlock` after `complete_io` returned `Ok` (it returns
+  `(usize, usize)`, no status enum); `TlsStream::read` maps that to `Ok(0)` = end of body.
+  `WouldBlock` as an *error* from `complete_io` is the socket read timeout (120 s) and
+  surfaces as `read timed out`. `http::read_all` and `http::each_line` keep whatever arrived.
+- Transient LLM failures retry with progressive waits (1s, 2s, 4s, capped at 30s, default
+  3 attempts via `llm_retries` in config.yaml): transport drops before response headers,
+  HTTP 429/5xx, and empty streams. Never after the first emitted event — no duplicated text.
 - Gemini thinking models attach `thoughtSignature` to functionCall parts (a sibling of
   `functionCall` on the part). The next request must echo it back as `thought_signature`, or
   the follow-up request is rejected with HTTP 400 "Function call is missing a
