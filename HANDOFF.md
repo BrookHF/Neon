@@ -25,7 +25,7 @@ A minimal coding agent in Rust, one binary, nothing installed to run it. One too
 
 ```
 commits   ed6e474 milestone 1, c68f21b wire notes, 1c82cdf milestone 2
-files     src/{lib,main,agent,llm,http,tools,config,prompt,messages,error,ui}.rs (~2.4k lines)
+files     src/{lib,main,agent,llm,http,tools,config,prompt,messages,error,ui}.rs (2297 lines)
           fixtures/{demo,limit,steer}.jsonl   tests/loop.rs   scripts/tui-smoke.py
 deps      serde, serde_json, rustls (ring provider), webpki-roots, yaml-rust2,
           ratatui 0.30.2, crossterm 0.29.0
