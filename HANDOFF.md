@@ -126,6 +126,9 @@ RUST_MIN_STACK = "8000000"` is committed for tests and UI worker threads.
 - Transcript lines word-wrap (`ui.rs` `wrap_to`, hard-breaking over-long words); long
   replies stay inside the window. Before this the render clipped each line at terminal
   width, cutting replies mid-sentence.
+- Input line editor with a movable cursor (`ui.rs` `LineInput`): arrows/Home/End move it,
+  Backspace/Delete edit at the cursor, Up/Down recall sent inputs, the cursor is drawn at
+  the edit position via `frame.set_cursor_position`.
 
 ## Things already learned (do not rediscover)
 

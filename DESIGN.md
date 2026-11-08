@@ -134,7 +134,9 @@ Native wire format, not the OpenAI-compatible one.
 ## TUI
 
 `ratatui` + `crossterm`: streaming text area, tool cards (name, args, status, excerpt),
-status bar (model, token estimate, loaded plugins), input line. Plain stdio mode stays as a
+status bar (model, token estimate, loaded plugins), input line with a visible cursor:
+arrow keys and Home/End move it, Backspace/Delete edit at the cursor, Up/Down recall
+sent inputs, Paste inserts at the cursor. Plain stdio mode stays as a
 fallback for pipes and phones with a dumb terminal (`neon --plain`).
 
 ## Testing

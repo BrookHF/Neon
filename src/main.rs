@@ -28,7 +28,8 @@ const HELP: &str = r#"neon - a minimal coding agent
   neon --patch <file>     patch layer over the profile, last layer wins
   neon --config <path>    use another config file
 
-TUI keys: Enter sends or steers · Ctrl+C aborts a run, quits when idle · Ctrl+D quits
+TUI keys: Enter sends or steers · Left/Right/Home/End move the cursor · Up/Down recall
+history · Backspace/Delete edit at the cursor · Ctrl+C aborts a run, quits when idle · Ctrl+D quits
 TUI commands: /plugin list|load|unload|reload (applies at the next turn)
 Config: ~/.config/neon/config.yaml (api_key there, never in the environment)
 Plain REPL commands: :tools, :model, :hist, :plugin <verb>, :quit

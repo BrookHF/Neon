@@ -141,6 +141,15 @@ def main():
     results.append(("long reply wraps in window", "ENDWORD" in n))
     os.remove(long)
 
+    # The cursor moves with arrow keys and edits mid-line.
+    s, rc = screen(
+        ["--fixture", "fixtures/demo.jsonl"],
+        [(b"ab cd", 0.2), (b"\x1b[D", 0.15), (b"\x1b[D", 0.15), (b"x", 0.15), (b"\r", 0.3)],
+        2.5,
+    )
+    n = norm(s)
+    results.append(("cursor edit mid-line", ">abxcd" in n))
+
     slow = os.path.join(REPO, "fixtures", "slow-tmp.jsonl")
     write_fixture(
         slow,

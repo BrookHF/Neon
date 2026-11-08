@@ -146,6 +146,97 @@ fn wrap_to(text: &str, width: usize) -> Vec<String> {
     out
 }
 
+/// The typed line with a movable cursor. Indexes are char counts, not bytes.
+#[derive(Default)]
+pub struct LineInput {
+    pub text: String,
+    pub cursor: usize,
+}
+
+impl LineInput {
+    fn char_len(&self) -> usize {
+        self.text.chars().count()
+    }
+
+    fn byte_at(&self, chars: usize) -> usize {
+        self.text.chars().take(chars).map(|c| c.len_utf8()).sum()
+    }
+
+    pub fn insert(&mut self, ch: char) {
+        let off = self.byte_at(self.cursor);
+        self.text.insert(off, ch);
+        self.cursor += 1;
+    }
+
+    pub fn insert_str(&mut self, s: &str) {
+        let off = self.byte_at(self.cursor);
+        self.text.replace_range(off..off, s);
+        self.cursor += s.chars().count();
+    }
+
+    pub fn left(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    pub fn right(&mut self) {
+        if self.cursor < self.char_len() {
+            self.cursor += 1;
+        }
+    }
+
+    pub fn home(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub fn end(&mut self) {
+        self.cursor = self.char_len();
+    }
+
+    pub fn backspace(&mut self) {
+        if self.cursor > 0 {
+            let from = self.byte_at(self.cursor - 1);
+            let to = self.byte_at(self.cursor);
+            self.text.replace_range(from..to, "");
+            self.cursor -= 1;
+        }
+    }
+
+    pub fn delete(&mut self) {
+        if self.cursor < self.char_len() {
+            let from = self.byte_at(self.cursor);
+            let to = self.byte_at(self.cursor + 1);
+            self.text.replace_range(from..to, "");
+        }
+    }
+
+    /// The slice that fits in `width` columns, plus the cursor column inside it.
+    pub fn visible(&self, width: usize) -> (String, usize) {
+        if width == 0 {
+            return (String::new(), 0);
+        }
+        let len = self.char_len();
+        if len <= width {
+            return (self.text.clone(), self.cursor);
+        }
+        let mut start = if self.cursor + 1 > width {
+            self.cursor + 1 - width
+        } else {
+            0
+        };
+        let end = (start + width).min(len);
+        if end - start < width {
+            start = end.saturating_sub(width);
+        }
+        let slice: String = self.text.chars().skip(start).take(end - start).collect();
+        (slice, self.cursor - start)
+    }
+
+    pub fn clear(&mut self) {
+        self.text.clear();
+        self.cursor = 0;
+    }
+}
+
 fn status_line(cfg: &Config, cwd: &PathBuf, shared: &Shared, registry: &Registry) -> String {
     let tokens = shared.tokens.load(Ordering::Relaxed);
     let state = if shared.running.load(Ordering::Relaxed) {
@@ -165,7 +256,7 @@ fn status_line(cfg: &Config, cwd: &PathBuf, shared: &Shared, registry: &Registry
 fn render(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     shared: &Shared,
-    input: &str,
+    input: &LineInput,
     status: &str,
 ) -> IoResult<()> {
     terminal.draw(|frame| {
@@ -195,17 +286,53 @@ fn render(
 
         frame.render_widget(Paragraph::new(status), areas[0]);
         frame.render_widget(Paragraph::new(body), areas[1]);
+        let input_width = areas[2].width.saturating_sub(2) as usize;
+        let (visible, col) = input.visible(input_width);
         frame.render_widget(
-            Paragraph::new(format!("> {input}\nEnter sends · Ctrl+C abort or quit")),
+            Paragraph::new(format!("> {visible}\nEnter sends · Ctrl+C abort or quit")),
             areas[2],
         );
+        frame.set_cursor_position((areas[2].x + 2 + col as u16, areas[2].y));
     })?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::wrap_to;
+    use super::{wrap_to, LineInput};
+
+    #[test]
+    fn cursor_moves_and_edits_at_position() {
+        let mut li = LineInput::default();
+        li.insert_str("ab cd");
+        li.left();
+        li.left();
+        li.insert('x');
+        assert_eq!(li.text, "ab xcd");
+        assert_eq!(li.cursor, 4); // cursor sits after the inserted char
+        li.backspace();
+        assert_eq!(li.text, "ab cd");
+        li.home();
+        li.delete();
+        assert_eq!(li.text, "b cd");
+        li.end();
+        assert_eq!(li.cursor, 4);
+    }
+
+    #[test]
+    fn long_input_windows_around_the_cursor() {
+        let mut li = LineInput::default();
+        li.insert_str(&"abcdefghij".repeat(3));
+        li.home();
+        let (slice, col) = li.visible(10);
+        assert_eq!(slice.chars().count(), 10);
+        assert_eq!(col, 0);
+        li.cursor = 25;
+        let (slice, col) = li.visible(10);
+        assert_eq!(slice.chars().count(), 10);
+        assert_eq!(col, 9);
+        assert!(slice.contains("abcdef"));
+    }
 
     #[test]
     fn long_text_wraps_instead_of_being_cut() {
@@ -251,7 +378,9 @@ pub fn run(
         shared.push(Row::Note(format!("resumed {n} messages")));
     }
 
-    let mut input = String::new();
+    let mut input = LineInput::default();
+    let mut sent_inputs: Vec<String> = Vec::new();
+    let mut hist_idx: Option<usize> = None;
     loop {
         if event::poll(Duration::from_millis(60))? {
             match event::read()? {
@@ -273,10 +402,17 @@ pub fn run(
                             _ => {}
                         }
                     } else if key.code == KeyCode::Enter {
-                        let msg = input.clone();
+                        let msg = input.text.clone();
                         input.clear();
+                        hist_idx = None;
                         if msg.trim().is_empty() {
                             continue;
+                        }
+                        if !msg.trim().starts_with('/') {
+                            sent_inputs.push(msg.clone());
+                            if sent_inputs.len() > 50 {
+                                sent_inputs.remove(0);
+                            }
                         }
                         if shared.running.load(Ordering::Relaxed) {
                             controls.steer(&msg);
@@ -307,12 +443,43 @@ pub fn run(
                             thread::spawn(move || worker.turn());
                         }
                     } else if key.code == KeyCode::Backspace {
-                        input.pop();
+                        input.backspace();
+                    } else if key.code == KeyCode::Delete {
+                        input.delete();
+                    } else if key.code == KeyCode::Left {
+                        input.left();
+                    } else if key.code == KeyCode::Right {
+                        input.right();
+                    } else if key.code == KeyCode::Home {
+                        input.home();
+                    } else if key.code == KeyCode::End {
+                        input.end();
+                    } else if key.code == KeyCode::Up {
+                        if !sent_inputs.is_empty() {
+                            let idx = match hist_idx {
+                                Some(i) => i.saturating_sub(1),
+                                None => sent_inputs.len() - 1,
+                            };
+                            hist_idx = Some(idx);
+                            input.text = sent_inputs[idx].clone();
+                            input.cursor = input.text.chars().count();
+                        }
+                    } else if key.code == KeyCode::Down {
+                        if let Some(i) = hist_idx {
+                            if i + 1 < sent_inputs.len() {
+                                hist_idx = Some(i + 1);
+                                input.text = sent_inputs[i + 1].clone();
+                                input.cursor = input.text.chars().count();
+                            } else {
+                                hist_idx = None;
+                                input.clear();
+                            }
+                        }
                     } else if let KeyCode::Char(ch) = key.code {
-                        input.push(ch);
+                        input.insert(ch);
                     }
                 }
-                Event::Paste(text) => input.push_str(&text),
+                Event::Paste(text) => input.insert_str(&text),
                 _ => {}
             }
         }
