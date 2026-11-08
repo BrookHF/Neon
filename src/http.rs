@@ -320,10 +320,12 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
 
 /// Call `cb` for each line of a streamed body. A connection that ends without a TLS
 /// close_notify still delivers everything it sent; the read error is returned as a message.
-pub fn each_line<R: Read>(r: &mut R, mut cb: impl FnMut(&str)) -> Option<String> {
+/// Stream lines; the callback returns false to stop reading (stall or `[DONE]`).
+pub fn each_line<R: Read>(r: &mut R, mut cb: impl FnMut(&str) -> bool) -> Option<String> {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 8192];
     let mut io_error: Option<String> = None;
+    let mut stopped = false;
     loop {
         match r.read(&mut tmp) {
             Ok(0) => break,
@@ -338,13 +340,19 @@ pub fn each_line<R: Read>(r: &mut R, mut cb: impl FnMut(&str)) -> Option<String>
                 Some(pos) => {
                     let line = buf[..pos].to_vec();
                     buf.drain(..pos + 1);
-                    cb(std::str::from_utf8(&line).unwrap_or(""));
+                    if !cb(std::str::from_utf8(&line).unwrap_or("")) {
+                        stopped = true;
+                        break;
+                    }
                 }
                 None => break,
             }
         }
+        if stopped {
+            break;
+        }
     }
-    if !buf.is_empty() {
+    if !buf.is_empty() && !stopped {
         cb(std::str::from_utf8(&buf).unwrap_or(""));
     }
     io_error
@@ -435,7 +443,22 @@ mod tests {
     fn lines_stream_in_order() {
         let mut cursor = std::io::Cursor::new(b"data: one\n\ndata: two\nlast".to_vec());
         let mut lines = Vec::new();
-        each_line(&mut cursor, |l| lines.push(l.to_string()));
+        each_line(&mut cursor, |l| {
+            lines.push(l.to_string());
+            true
+        });
         assert_eq!(lines, ["data: one", "", "data: two", "last"]);
+    }
+
+    #[test]
+    fn each_line_stops_when_callback_returns_false() {
+        let mut cursor = std::io::Cursor::new(b"one\ntwo\nthree\n".to_vec());
+        let mut lines = Vec::new();
+        let err = each_line(&mut cursor, |l| {
+            lines.push(l.to_string());
+            lines.len() < 2
+        });
+        assert_eq!(lines, ["one", "two"]);
+        assert!(err.is_none());
     }
 }

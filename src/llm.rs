@@ -65,44 +65,42 @@ impl GeminiAdapter {
         let mut last_data = std::time::Instant::now();
         let idle = std::time::Duration::from_secs(self.cfg.stream_idle_secs);
         let io_error = http::each_line(&mut resp.body, |line| {
+            // Idle guard runs on every line, including keepalive comments and blanks.
+            if last_data.elapsed() > idle {
+                failure.get_or_insert_with(|| format!("stream stalled: no data for {idle:?}"));
+                return false;
+            }
             let payload = match line.trim().strip_prefix("data:") {
                 Some(p) => p.trim(),
-                None => {
-                    if line.trim().is_empty() {
-                        if last_data.elapsed() > idle {
-                            failure.get_or_insert_with(|| {
-                                format!("stream stalled: no data for {idle:?}")
-                            });
-                        }
-                    }
-                    return;
-                }
+                None => return true,
             };
             if payload == "[DONE]" {
-                return;
+                return false;
             }
             last_data = std::time::Instant::now();
             if let Some(path) = &dump {
                 if let Err(e) = crate::append_line(std::path::Path::new(path), payload) {
                     failure.get_or_insert_with(|| format!("wire dump: {e}"));
-                    return;
+                    return false;
                 }
             }
             let value: Value = match serde_json::from_str(payload) {
                 Ok(v) => v,
                 Err(e) => {
                     failure.get_or_insert_with(|| format!("bad stream chunk: {e}"));
-                    return;
+                    return false;
                 }
             };
             if let Some(err) = value.get("error") {
                 failure.get_or_insert_with(|| err.to_string());
-                return;
+                return false;
             }
             if let Some(msg) = parse_chunk(&value, sink, &mut call_index) {
                 failure.get_or_insert_with(|| msg);
+                return false;
             }
             saw_any = true;
+            true
         });
 
         if let Some(msg) = failure {
