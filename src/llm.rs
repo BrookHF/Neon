@@ -152,6 +152,10 @@ fn parse_chunk(value: &Value, sink: &mut dyn FnMut(Event), call_index: &mut usiz
         .and_then(|p| p.as_array());
     if let Some(parts) = parts {
         for part in parts {
+            // Thinking-model reasoning summaries are not conversation text; drop them.
+            if part.get("thought").and_then(|t| t.as_bool()).unwrap_or(false) {
+                continue;
+            }
             if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
                 if !text.is_empty() {
                     sink(Event::Delta(text.to_string()));
@@ -162,12 +166,19 @@ fn parse_chunk(value: &Value, sink: &mut dyn FnMut(Event), call_index: &mut usiz
                     None => return Some("functionCall has no name".to_string()),
                 };
                 let args = call.get("args").cloned().unwrap_or(json!({}));
+                // A sibling of functionCall on the part; both spellings appear in the wild.
+                let sig = part
+                    .get("thought_signature")
+                    .or_else(|| part.get("thoughtSignature"))
+                    .and_then(|s| s.as_str())
+                    .map(str::to_string);
                 let id = format!("call_{call_index}");
                 *call_index += 1;
                 sink(Event::Call(ToolCall {
                     id,
                     name: name.to_string(),
                     args,
+                    thought_sig: sig,
                 }));
             }
         }
@@ -228,7 +239,13 @@ fn parts_wire(m: &Message) -> Vec<Value> {
         .iter()
         .map(|p| match p {
             Part::Text(t) => json!({ "text": t }),
-            Part::Call(c) => json!({ "functionCall": { "name": c.name, "args": c.args } }),
+            Part::Call(c) => {
+                let mut part = json!({ "functionCall": { "name": c.name, "args": c.args } });
+                if let Some(sig) = &c.thought_sig {
+                    part["thought_signature"] = json!(sig);
+                }
+                part
+            }
             Part::Result {
                 name,
                 content,
@@ -283,6 +300,7 @@ mod tests {
                             id: "call_0".to_string(),
                             name: "bash".to_string(),
                             args: json!({ "command": "ls" }),
+                            thought_sig: Some("sig-1".to_string()),
                         }),
                     ],
                 },
@@ -320,6 +338,7 @@ mod tests {
         assert_eq!(body["contents"][0]["role"], "user");
         assert_eq!(body["contents"][1]["role"], "model");
         assert_eq!(body["contents"][1]["parts"][1]["functionCall"]["name"], "bash");
+        assert_eq!(body["contents"][1]["parts"][1]["thought_signature"], "sig-1");
         assert_eq!(
             body["contents"][2]["parts"][0]["functionResponse"]["name"],
             "bash"
@@ -330,6 +349,27 @@ mod tests {
             .get("additionalProperties")
             .is_none());
         assert_eq!(body["generationConfig"]["maxOutputTokens"], 2048);
+    }
+
+    #[test]
+    fn chunk_captures_thought_signature_and_skips_thought_text() {
+        let chunk = json!({
+            "candidates": [{
+                "content": { "parts": [
+                    { "text": "hidden reasoning", "thought": true },
+                    { "functionCall": { "name": "bash", "args": {} }, "thoughtSignature": "sig-abc" }
+                ] },
+                "finish_reason": "STOP"
+            }]
+        });
+        let mut events = Vec::new();
+        let err = parse_chunk(&chunk, &mut |e| events.push(e), &mut 0);
+        assert!(err.is_none());
+        assert_eq!(events.len(), 2); // the thought text is not a delta
+        match &events[0] {
+            Event::Call(c) => assert_eq!(c.thought_sig.as_deref(), Some("sig-abc")),
+            other => panic!("expected a call, got {other:?}"),
+        }
     }
 
     #[test]

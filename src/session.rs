@@ -77,7 +77,12 @@ impl Session {
                     .parts
                     .iter()
                     .filter_map(|p| match p {
-                        Part::Call(c) => Some(json!({ "id": c.id, "name": c.name, "args": c.args })),
+                        Part::Call(c) => Some(json!({
+                            "id": c.id,
+                            "name": c.name,
+                            "args": c.args,
+                            "sig": c.thought_sig,
+                        })),
                         _ => None,
                     })
                     .collect();
@@ -210,6 +215,10 @@ pub fn replay(path: &Path) -> Result<(Vec<Message>, Option<Value>)> {
                             id: c.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
                             name: c.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
                             args: c.get("args").cloned().unwrap_or(json!({})),
+                            thought_sig: c
+                                .get("sig")
+                                .and_then(|s| s.as_str())
+                                .map(str::to_string),
                         }));
                     }
                 }
@@ -253,6 +262,7 @@ mod tests {
             id: id.to_string(),
             name: "bash".to_string(),
             args: json!({ "command": cmd }),
+            thought_sig: None,
         })
     }
 
@@ -290,6 +300,29 @@ mod tests {
         assert!(matches!(msgs[2].parts[0], Part::Result { .. }));
         assert!(matches!(msgs[2].parts[1], Part::Text(_)));
         assert_eq!(msgs[2].text(), "steer text");
+    }
+
+    #[test]
+    fn thought_signature_survives_the_session_log() {
+        let d = dir("sig");
+        let s = Session::create(&d, "m", &d).unwrap();
+        s.record_message(&Message::user("go")).unwrap();
+        s.record_message(&Message {
+            role: Role::Assistant,
+            parts: vec![Part::Call(ToolCall {
+                id: "c0".to_string(),
+                name: "bash".to_string(),
+                args: json!({ "command": "ls" }),
+                thought_sig: Some("sig-9".to_string()),
+            })],
+        })
+        .unwrap();
+        let (msgs, _) = replay(&s.path).unwrap();
+        assert_eq!(msgs.len(), 2);
+        match &msgs[1].parts[0] {
+            Part::Call(c) => assert_eq!(c.thought_sig.as_deref(), Some("sig-9")),
+            other => panic!("expected a call, got {other:?}"),
+        }
     }
 
     #[test]

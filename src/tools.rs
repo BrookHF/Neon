@@ -347,6 +347,7 @@ mod tests {
             id: "call_0".to_string(),
             name: "bash".to_string(),
             args: json!({ "command": "echo hello && echo bad >&2" }),
+            thought_sig: None,
         };
         let r = registry.execute(&call, &ctx(&dir));
         assert!(!r.is_error);
@@ -368,6 +369,7 @@ mod tests {
             id: "c".to_string(),
             name: "bash".to_string(),
             args: json!({ "command": "sleep 5", "timeout_secs": 1 }),
+            thought_sig: None,
         };
         let r = registry.execute(&call, &ctx(&dir));
         assert!(r.is_error);
@@ -399,6 +401,7 @@ mod tests {
                 id: "a".to_string(),
                 name: "bash".to_string(),
                 args: json!({ "command": "rm -rf /" }),
+                thought_sig: None,
             },
             &ctx(&dir),
         );
@@ -409,6 +412,7 @@ mod tests {
                 id: "b".to_string(),
                 name: "bash".to_string(),
                 args: json!({ "command": "echo fine" }),
+                thought_sig: None,
             },
             &ctx(&dir),
         );

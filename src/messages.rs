@@ -24,6 +24,9 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub args: Value,
+    /// Gemini thinking models sign functionCall parts; the signature must be echoed
+    /// back on the next request or the call is rejected with HTTP 400.
+    pub thought_sig: Option<String>,
 }
 
 #[derive(Clone, Debug)]
