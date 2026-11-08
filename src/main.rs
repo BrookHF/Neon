@@ -1,26 +1,30 @@
-//! CLI: interactive REPL, print mode, and a fixture mode that needs no key.
+//! CLI: TUI by default, plain REPL with `--plain`, print mode with `-p`.
 
 use std::io::{Write, stdin, stdout};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
 
-use neon::agent::Agent;
+use neon::agent::{Agent, Controls, StdioSink};
 use neon::config::{Config, default_path};
 use neon::llm::{Adapter, FixtureAdapter, GeminiAdapter};
 use neon::messages::{Message, estimate_tokens};
 use neon::tools::{BashTool, Registry};
+use neon::ui;
 use neon::VERSION;
 
 const HELP: &str = r#"neon - a minimal coding agent
 
-  neon                    interactive REPL in the current folder
+  neon                    TUI in the current folder
+  neon --plain            plain REPL, for pipes and dumb terminals
   neon -p "task"          run one task and exit
   neon --fixture f.jsonl  replay a recorded model stream, no key and no network
   neon --model <name>     override the model from config
   neon --config <path>    use another config file
 
-In the REPL: :tools, :model, :hist, :quit
+TUI keys: Enter sends or steers · Ctrl+C aborts a run, quits when idle · Ctrl+D quits
 Config: ~/.config/neon/config.yaml (api_key there, never in the environment)
+Plain REPL commands: :tools, :model, :hist, :quit
 "#;
 
 struct Args {
@@ -28,6 +32,7 @@ struct Args {
     fixture: Option<PathBuf>,
     model: Option<String>,
     config: Option<PathBuf>,
+    plain: bool,
     help: bool,
     version: bool,
 }
@@ -38,6 +43,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
         fixture: None,
         model: None,
         config: None,
+        plain: false,
         help: false,
         version: false,
     };
@@ -63,6 +69,10 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
                 let v = raw.get(i + 1).ok_or("--config needs a path")?;
                 a.config = Some(PathBuf::from(v));
                 i += 2;
+            }
+            "--plain" => {
+                a.plain = true;
+                i += 1;
             }
             "-h" | "--help" => {
                 a.help = true;
@@ -108,35 +118,35 @@ fn main() -> ExitCode {
         cfg.model = m;
     }
 
-    let adapter: Box<dyn Adapter> = match &args.fixture {
+    let adapter: Arc<dyn Adapter> = match &args.fixture {
         Some(path) => match FixtureAdapter::from_file(path) {
-            Ok(f) => Box::new(f),
+            Ok(f) => Arc::new(f),
             Err(e) => {
                 eprintln!("neon: {e}");
                 return ExitCode::from(4);
             }
         },
-        None => Box::new(GeminiAdapter::new(cfg.clone())),
+        None => Arc::new(GeminiAdapter::new(cfg.clone())),
     };
 
     let mut registry = Registry::new();
     registry.add(Box::new(BashTool));
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut history: Vec<Message> = Vec::new();
-    let stdout_handle = stdout();
-    let mut out = stdout_handle.lock();
-
-    let mut agent = Agent {
-        adapter: adapter.as_ref(),
-        registry: &registry,
-        cfg: &cfg,
-        cwd: cwd.clone(),
-        out: &mut out,
-    };
+    let controls = Arc::new(Controls::default());
+    let session: Arc<Mutex<Vec<Message>>> = Arc::new(Mutex::new(Vec::new()));
+    let cfg = Arc::new(cfg);
 
     if let Some(task) = args.task.clone() {
-        history.push(Message::user(&task));
+        let agent = Agent {
+            adapter,
+            registry: Arc::new(registry),
+            cfg,
+            sink: Arc::new(StdioSink),
+            controls,
+            cwd,
+        };
+        let mut history = vec![Message::user(&task)];
         match agent.run_turn(&mut history) {
             Ok(_) => return ExitCode::SUCCESS,
             Err(e) => {
@@ -146,8 +156,49 @@ fn main() -> ExitCode {
         }
     }
 
+    if args.plain {
+        return plain_repl(
+            adapter,
+            Arc::new(registry),
+            cfg,
+            controls,
+            session,
+            cwd,
+            &config_path,
+        );
+    }
+
+    match ui::run(adapter, Arc::new(registry), cfg, session, controls, cwd) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("neon: the terminal failed: {e}");
+            eprintln!("try `neon --plain` for a plain REPL.");
+            ExitCode::from(6)
+        }
+    }
+}
+
+fn plain_repl(
+    adapter: Arc<dyn Adapter>,
+    registry: Arc<Registry>,
+    cfg: Arc<Config>,
+    controls: Arc<Controls>,
+    session: Arc<Mutex<Vec<Message>>>,
+    cwd: PathBuf,
+    config_path: &std::path::Path,
+) -> ExitCode {
+    let agent = Agent {
+        adapter,
+        registry: registry.clone(),
+        cfg: cfg.clone(),
+        sink: Arc::new(StdioSink),
+        controls,
+        cwd: cwd.clone(),
+    };
+
     println!("neon {VERSION} · model {} · folder {}", cfg.model, cwd.display());
     println!("Type a task. :quit to leave. Ctrl+C leaves too.");
+
     let stdin_handle = stdin();
     loop {
         print!("> ");
@@ -164,8 +215,8 @@ fn main() -> ExitCode {
         match input.as_str() {
             ":quit" | ":q" => return ExitCode::SUCCESS,
             ":tools" => {
-                for s in registry.schemas() {
-                    println!("- {}", s.name);
+                for schema in registry.schemas() {
+                    println!("- {}", schema.name);
                 }
                 continue;
             }
@@ -174,6 +225,7 @@ fn main() -> ExitCode {
                 continue;
             }
             ":hist" => {
+                let history = session.lock().expect("session lock");
                 println!(
                     "{} messages, about {} tokens",
                     history.len(),
@@ -187,9 +239,12 @@ fn main() -> ExitCode {
             }
             _ => {}
         }
-        history.push(Message::user(&input));
-        if let Err(e) = agent.run_turn(&mut history) {
-            eprintln!("[error: {e}]");
+        {
+            let mut history = session.lock().expect("session lock");
+            history.push(Message::user(&input));
+            if let Err(e) = agent.run_turn(&mut history) {
+                eprintln!("[error: {e}]");
+            }
         }
     }
 }

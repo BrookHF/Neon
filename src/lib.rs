@@ -8,6 +8,7 @@ pub mod llm;
 pub mod messages;
 pub mod prompt;
 pub mod tools;
+pub mod ui;
 
 use std::path::PathBuf;
 

@@ -10,7 +10,7 @@ use crate::error::{AgentError, Result};
 use crate::http;
 use crate::messages::{Event, Message, Part, Request, ToolCall};
 
-pub trait Adapter {
+pub trait Adapter: Send + Sync {
     /// Drive one model request. Events arrive in stream order.
     fn stream(&self, req: &Request, sink: &mut dyn FnMut(Event)) -> Result<()>;
 }

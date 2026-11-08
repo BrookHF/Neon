@@ -1,7 +1,9 @@
-//! The turn/step driver. A turn is zero or more steps; a step is one request plus its tools.
+//! The turn/step driver, the sink it writes to, and the steering/abort controls.
+//! A turn is zero or more steps; a step is one request plus the tools it calls.
 
-use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
@@ -10,7 +12,109 @@ use crate::error::{AgentError, Result};
 use crate::llm::Adapter;
 use crate::messages::{Event, Message, Part, Request, Role, ToolCall, estimate_tokens};
 use crate::prompt::build_system;
-use crate::tools::{Registry, ToolCtx};
+use crate::tools::{Registry, ToolCtx, ToolResult};
+
+/// Where the loop reports progress. Plain stdio, the TUI, or a test buffer.
+pub trait Sink: Send + Sync {
+    fn text(&self, chunk: &str);
+    fn tool_call(&self, call: &ToolCall);
+    fn tool_result(&self, call: &ToolCall, result: &ToolResult);
+    fn note(&self, msg: &str);
+}
+
+pub struct StdioSink;
+
+impl Sink for StdioSink {
+    fn text(&self, chunk: &str) {
+        use std::io::Write;
+        let out = std::io::stdout();
+        let _ = out.lock().write_all(chunk.as_bytes());
+        let _ = std::io::stdout().flush();
+    }
+
+    fn tool_call(&self, call: &ToolCall) {
+        println!("\n-> {} {}", call.name, compact(&call.args));
+    }
+
+    fn tool_result(&self, call: &ToolCall, result: &ToolResult) {
+        println!(
+            "<- {}{}",
+            first_line(&result.content),
+            if result.is_error { " [error]" } else { "" }
+        );
+        let _ = call;
+    }
+
+    fn note(&self, msg: &str) {
+        println!("[{msg}]");
+    }
+}
+
+#[derive(Default)]
+pub struct VecSink {
+    lines: Mutex<Vec<String>>,
+}
+
+impl VecSink {
+    pub fn dump(&self) -> String {
+        self.lines.lock().expect("sink lock").join("\n")
+    }
+}
+
+impl Sink for VecSink {
+    fn text(&self, chunk: &str) {
+        self.lines.lock().expect("sink lock").push(chunk.to_string());
+    }
+
+    fn tool_call(&self, call: &ToolCall) {
+        self.lines
+            .lock()
+            .expect("sink lock")
+            .push(format!("-> {} {}", call.name, compact(&call.args)));
+    }
+
+    fn tool_result(&self, _call: &ToolCall, result: &ToolResult) {
+        self.lines.lock().expect("sink lock").push(format!(
+            "<- {}{}",
+            first_line(&result.content),
+            if result.is_error { " [error]" } else { "" }
+        ));
+    }
+
+    fn note(&self, msg: &str) {
+        self.lines.lock().expect("sink lock").push(format!("[{msg}]"));
+    }
+}
+
+/// Steering messages typed while a turn runs, plus the abort switch.
+#[derive(Default)]
+pub struct Controls {
+    inbox: Mutex<Vec<String>>,
+    abort: AtomicBool,
+}
+
+impl Controls {
+    pub fn steer(&self, msg: &str) {
+        self.inbox.lock().expect("inbox lock").push(msg.to_string());
+    }
+
+    pub fn take_steering(&self) -> Option<String> {
+        self.inbox.lock().expect("inbox lock").pop()
+    }
+
+    pub fn abort(&self) {
+        self.abort.store(true, Ordering::Relaxed);
+    }
+
+    pub fn aborted(&self) -> bool {
+        self.abort.load(Ordering::Relaxed)
+    }
+
+    pub fn reset(&self) {
+        self.abort.store(false, Ordering::Relaxed);
+        self.inbox.lock().expect("inbox lock").clear();
+    }
+}
 
 #[derive(Debug)]
 pub struct TurnOutcome {
@@ -18,18 +122,28 @@ pub struct TurnOutcome {
     pub text: String,
     /// True when the loop hit `max_steps` instead of finishing.
     pub stopped_at_limit: bool,
+    /// True when Ctrl+C stopped the turn.
+    pub aborted: bool,
 }
 
-pub struct Agent<'a> {
-    pub adapter: &'a dyn Adapter,
-    pub registry: &'a Registry,
-    pub cfg: &'a Config,
+pub struct Agent {
+    pub adapter: Arc<dyn Adapter>,
+    pub registry: Arc<Registry>,
+    pub cfg: Arc<Config>,
+    pub sink: Arc<dyn Sink>,
+    pub controls: Arc<Controls>,
     pub cwd: PathBuf,
-    pub out: &'a mut dyn Write,
 }
 
-impl<'a> Agent<'a> {
-    pub fn run_turn(&mut self, history: &mut Vec<Message>) -> Result<TurnOutcome> {
+impl Agent {
+    pub fn run_turn(&self, history: &mut Vec<Message>) -> Result<TurnOutcome> {
+        let outcome = self.run_inner(history);
+        // Leftover steering and the abort switch belong to the turn that just ended.
+        self.controls.reset();
+        outcome
+    }
+
+    fn run_inner(&self, history: &mut Vec<Message>) -> Result<TurnOutcome> {
         let ctx = ToolCtx {
             cwd: self.cwd.clone(),
             timeout_secs: self.cfg.bash_timeout_secs,
@@ -41,6 +155,15 @@ impl<'a> Agent<'a> {
         let mut final_text = String::new();
 
         for _ in 0..self.cfg.max_steps {
+            if self.controls.aborted() {
+                self.sink.note("aborted");
+                return Ok(TurnOutcome {
+                    steps,
+                    text: final_text,
+                    stopped_at_limit: false,
+                    aborted: true,
+                });
+            }
             if estimate_tokens(history) > self.cfg.context_budget_tokens {
                 return Err(AgentError::Adapter(format!(
                     "context budget of {} tokens exceeded. Compaction arrives in milestone 4.",
@@ -60,24 +183,18 @@ impl<'a> Agent<'a> {
 
             let mut text = String::new();
             let mut calls: Vec<ToolCall> = Vec::new();
-            let out = &mut self.out;
             self.adapter.stream(&request, &mut |event| match event {
                 Event::Delta(chunk) => {
                     text.push_str(&chunk);
-                    let _ = out.write_all(chunk.as_bytes());
-                    let _ = out.flush();
+                    self.sink.text(&chunk);
                 }
                 Event::Call(call) => calls.push(call),
                 Event::Done { .. } => {}
                 Event::Error(msg) => {
                     text.push_str(&format!("\n[adapter error: {msg}]\n"));
-                    let _ = out.write_all(text.as_bytes());
+                    self.sink.text(&text);
                 }
             })?;
-            if !text.is_empty() {
-                let _ = out.write_all(b"\n");
-                let _ = out.flush();
-            }
 
             if calls.is_empty() {
                 history.push(Message {
@@ -89,14 +206,39 @@ impl<'a> Agent<'a> {
                     steps,
                     text: final_text,
                     stopped_at_limit: false,
+                    aborted: false,
                 });
+            }
+
+            // Run calls in order. Steering lands after the tool that was in flight, and
+            // the calls still owed are dropped, so no call goes unanswered.
+            let mut executed: Vec<(ToolCall, ToolResult)> = Vec::new();
+            let mut steering: Option<String> = None;
+            let mut aborted = false;
+            for call in &calls {
+                if self.controls.aborted() {
+                    aborted = true;
+                    break;
+                }
+                self.sink.tool_call(call);
+                let result = self.registry.execute(call, &ctx);
+                self.sink.tool_result(call, &result);
+                executed.push((call.clone(), result));
+                if self.controls.aborted() {
+                    aborted = true;
+                    break;
+                }
+                steering = self.controls.take_steering();
+                if steering.is_some() {
+                    break;
+                }
             }
 
             let mut parts: Vec<Part> = Vec::new();
             if !text.is_empty() {
                 parts.push(Part::Text(text));
             }
-            for call in &calls {
+            for (call, _) in &executed {
                 parts.push(Part::Call(call.clone()));
             }
             history.push(Message {
@@ -105,33 +247,39 @@ impl<'a> Agent<'a> {
             });
 
             let mut results: Vec<Part> = Vec::new();
-            for call in &calls {
-                let _ = writeln!(out, "\n-> {} {}", call.name, compact(&call.args));
-                let result = self.registry.execute(call, &ctx);
-                let _ = writeln!(
-                    out,
-                    "<- {}{}",
-                    first_line(&result.content),
-                    if result.is_error { " [error]" } else { "" }
-                );
-                let _ = out.flush();
+            for (call, result) in &executed {
                 results.push(Part::Result {
                     call_id: call.id.clone(),
                     name: call.name.clone(),
-                    content: result.content,
+                    content: result.content.clone(),
                     is_error: result.is_error,
                 });
             }
-            history.push(Message {
-                role: Role::User,
-                parts: results,
-            });
+            if !results.is_empty() || steering.is_some() {
+                if let Some(msg) = &steering {
+                    results.push(Part::Text(msg.clone()));
+                }
+                history.push(Message {
+                    role: Role::User,
+                    parts: results,
+                });
+            }
+            if aborted {
+                self.sink.note("aborted");
+                return Ok(TurnOutcome {
+                    steps,
+                    text: final_text,
+                    stopped_at_limit: false,
+                    aborted: true,
+                });
+            }
         }
 
         Ok(TurnOutcome {
             steps,
             text: final_text,
             stopped_at_limit: true,
+            aborted: false,
         })
     }
 }
@@ -147,5 +295,9 @@ fn compact(value: &Value) -> String {
 }
 
 fn first_line(text: &str) -> String {
-    text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").to_string()
+    text
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .to_string()
 }

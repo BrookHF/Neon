@@ -1,0 +1,2 @@
+{"candidates": [{"content": {"parts": [{"text": "I will run three commands."}, {"functionCall": {"name": "bash", "args": {"command": "echo one"}}}, {"functionCall": {"name": "bash", "args": {"command": "echo two"}}}, {"functionCall": {"name": "bash", "args": {"command": "echo three"}}}]}, "finish_reason": "STOP"}]}
+{"candidates": [{"content": {"parts": [{"text": "Stopped after the first one."}]}, "finish_reason": "STOP"}]}

@@ -21,7 +21,7 @@ pub struct ToolResult {
     pub is_error: bool,
 }
 
-pub trait Tool {
+pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn parameters(&self) -> Value;
