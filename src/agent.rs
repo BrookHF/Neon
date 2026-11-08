@@ -271,7 +271,7 @@ impl Agent {
                 tools: self.registry.schemas(),
                 model: self.cfg.model.clone(),
                 temperature: None,
-                max_tokens: None,
+                max_tokens: Some(self.cfg.max_tokens),
             };
 
             let mut text = String::new();
@@ -282,7 +282,13 @@ impl Agent {
                     self.sink.text(&chunk);
                 }
                 Event::Call(call) => calls.push(call),
-                Event::Done { .. } => {}
+                Event::Done { finish_reason } => {
+                    if finish_reason.as_deref() == Some("MAX_TOKENS") {
+                        self.sink.note(
+                            "output hit max_output_tokens \u{2014} raise max_tokens in config.yaml",
+                        );
+                    }
+                }
                 Event::Error(msg) => {
                     text.push_str(&format!("\n[adapter error: {msg}]\n"));
                     self.sink.text(&text);

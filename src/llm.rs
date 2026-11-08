@@ -214,7 +214,8 @@ fn parse_chunk(value: &Value, sink: &mut dyn FnMut(Event), call_index: &mut usiz
         }
     }
     let finish = cand
-        .get("finish_reason")
+        .get("finishReason")
+        .or_else(|| cand.get("finish_reason"))
         .and_then(|f| f.as_str())
         .map(str::to_string);
     sink(Event::Done {
@@ -399,6 +400,27 @@ mod tests {
         match &events[0] {
             Event::Call(c) => assert_eq!(c.thought_sig.as_deref(), Some("sig-abc")),
             other => panic!("expected a call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn camel_case_finish_reason_reports_truncation() {
+        // The real wire sends camelCase finishReason; MAX_TOKENS must reach the loop.
+        let chunk = json!({
+            "candidates": [{
+                "content": { "parts": [{ "text": "I will write the file now" }] },
+                "finishReason": "MAX_TOKENS"
+            }]
+        });
+        let mut events = Vec::new();
+        let err = parse_chunk(&chunk, &mut |e| events.push(e), &mut 0);
+        assert!(err.is_none());
+        assert_eq!(events.len(), 2);
+        match &events[1] {
+            Event::Done { finish_reason } => {
+                assert_eq!(finish_reason.as_deref(), Some("MAX_TOKENS"))
+            }
+            other => panic!("expected done, got {other:?}"),
         }
     }
 
