@@ -50,8 +50,21 @@ struct TlsStream {
 
 impl Read for TlsStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.conn.complete_io(&mut self.io)?;
-        self.conn.reader().read(buf)
+        // With a blocking socket, Ok means rustls made every bit of progress it can.
+        match self.conn.complete_io(&mut self.io) {
+            Ok(_) => match self.conn.reader().read(buf) {
+                Ok(n) => Ok(n),
+                // Nothing decrypted after full progress: the connection ended without
+                // a TLS close_notify. That is the end of the body, not an error.
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(0),
+                Err(e) => Err(e),
+            },
+            // WouldBlock as an error is the socket read timeout firing.
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                Err(io::Error::new(io::ErrorKind::TimedOut, "read timed out"))
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -126,37 +139,56 @@ pub fn get(url: &str) -> Result<Response> {
 fn request(method: &str, url: &str, headers: &[(&str, &str)], body: &[u8]) -> Result<Response> {
     let (host, port, path) = split_url(url)?;
     let tls = url.starts_with("https://");
-    let mut stream = connect(&host, port, tls)?;
 
-    let mut req = Vec::new();
-    req.extend_from_slice(format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nContent-Length: {}\r\nConnection: close\r\n", body.len()).as_bytes());
-    for (k, v) in headers {
-        req.extend_from_slice(format!("{k}: {v}\r\n").as_bytes());
+    // A drop before the response headers arrive is transient here (PRoot networking,
+    // or a server that closes without answering). Nothing was processed yet, so retrying
+    // the same request is safe. Failures after headers are not retried.
+    let mut last_err = String::new();
+    for attempt in 1..=3 {
+        let mut stream = match connect(&host, port, tls) {
+            Ok(s) => s,
+            Err(e) => {
+                last_err = e.to_string();
+                continue;
+            }
+        };
+        let mut req = Vec::new();
+        req.extend_from_slice(format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nContent-Length: {}\r\nConnection: close\r\n", body.len()).as_bytes());
+        for (k, v) in headers {
+            req.extend_from_slice(format!("{k}: {v}\r\n").as_bytes());
+        }
+        req.extend_from_slice(b"\r\n");
+        req.extend_from_slice(body);
+
+        if let Err(e) = stream.write_all(&req).and_then(|()| stream.flush()) {
+            last_err = format!("write: {e}");
+            continue;
+        }
+        match read_head(&mut stream) {
+            Ok((status, hs, leftover)) => {
+                let chunked = hs
+                    .iter()
+                    .any(|(k, v)| k == "transfer-encoding" && v.contains("chunked"));
+                return Ok(Response {
+                    status,
+                    body: Box::new(Body {
+                        inner: stream,
+                        leftover,
+                        chunked,
+                        chunk_left: 0,
+                        done: false,
+                        pending: std::collections::VecDeque::new(),
+                        raw: Vec::new(),
+                    }),
+                });
+            }
+            Err(e) => {
+                last_err = format!("head: {e}");
+                continue;
+            }
+        }
     }
-    req.extend_from_slice(b"\r\n");
-    req.extend_from_slice(body);
-
-    stream.write_all(&req).map_err(|e| AgentError::Http(format!("write: {e}")))?;
-    stream.flush().map_err(|e| AgentError::Http(format!("flush: {e}")))?;
-
-    let (status, _headers, leftover) =
-        read_head(&mut stream).map_err(|e| AgentError::Http(format!("head: {e}")))?;
-    let chunked = _headers
-        .iter()
-        .any(|(k, v)| k == "transfer-encoding" && v.contains("chunked"));
-
-    Ok(Response {
-        status,
-        body: Box::new(Body {
-            inner: stream,
-            leftover,
-            chunked,
-            chunk_left: 0,
-            done: false,
-            pending: std::collections::VecDeque::new(),
-            raw: Vec::new(),
-        }),
-    })
+    Err(AgentError::Http(format!("{last_err} (after 3 attempts)")))
 }
 
 /// Read status line and headers, and return bytes already read past the header block.
