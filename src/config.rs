@@ -18,6 +18,7 @@ pub struct Config {
     pub max_steps: usize,
     pub llm_retries: usize,
     pub max_tokens: u32,
+    pub stream_idle_secs: u64,
     pub profile: String,
     pub spill_dir: PathBuf,
     pub sessions_dir: PathBuf,
@@ -35,6 +36,7 @@ impl Default for Config {
             max_steps: 24,
             llm_retries: 3,
             max_tokens: 16_000,
+            stream_idle_secs: 180,
             profile: "default".to_string(),
             spill_dir: spill_dir(),
             sessions_dir: sessions_dir(),
@@ -93,6 +95,9 @@ impl Config {
         }
         if let Some(v) = doc["max_tokens"].as_i64() {
             cfg.max_tokens = v.max(256) as u32;
+        }
+        if let Some(v) = doc["stream_idle_secs"].as_i64() {
+            cfg.stream_idle_secs = v.max(10) as u64;
         }
         if let Some(v) = doc["profile"].as_str() {
             cfg.profile = v.to_string();

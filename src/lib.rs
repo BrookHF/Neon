@@ -27,4 +27,11 @@ pub fn sessions_dir() -> PathBuf {
     PathBuf::from(home).join(".local/state/neon/sessions")
 }
 
+/// Append one line to a file, creating it if needed. Used by NEON_WIRE_DUMP.
+pub fn append_line(path: &std::path::Path, line: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(f, "{line}")
+}
+
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

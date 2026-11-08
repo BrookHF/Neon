@@ -58,13 +58,35 @@ impl GeminiAdapter {
         let mut call_index = 0usize;
         let mut failure: Option<String> = None;
         let mut saw_any = false;
+        // Debug aid: NEON_WIRE_DUMP=/path appends each SSE payload line (never the key).
+        let dump = std::env::var("NEON_WIRE_DUMP").ok();
+        // Idle guard: SSE keepalive bytes keep the socket warm but carry no data, so a
+        // silent stream would hang forever. Track time since the last data line.
+        let mut last_data = std::time::Instant::now();
+        let idle = std::time::Duration::from_secs(self.cfg.stream_idle_secs);
         let io_error = http::each_line(&mut resp.body, |line| {
             let payload = match line.trim().strip_prefix("data:") {
                 Some(p) => p.trim(),
-                None => return,
+                None => {
+                    if line.trim().is_empty() {
+                        if last_data.elapsed() > idle {
+                            failure.get_or_insert_with(|| {
+                                format!("stream stalled: no data for {idle:?}")
+                            });
+                        }
+                    }
+                    return;
+                }
             };
             if payload == "[DONE]" {
                 return;
+            }
+            last_data = std::time::Instant::now();
+            if let Some(path) = &dump {
+                if let Err(e) = crate::append_line(std::path::Path::new(path), payload) {
+                    failure.get_or_insert_with(|| format!("wire dump: {e}"));
+                    return;
+                }
             }
             let value: Value = match serde_json::from_str(payload) {
                 Ok(v) => v,
@@ -84,6 +106,10 @@ impl GeminiAdapter {
         });
 
         if let Some(msg) = failure {
+            // A stall before any data is worth retrying; after data, surface it.
+            if !saw_any && msg.starts_with("stream stalled") {
+                return Err(AgentError::Retryable(msg));
+            }
             return Err(AgentError::Adapter(msg));
         }
         if !saw_any {
@@ -91,6 +117,10 @@ impl GeminiAdapter {
             return Err(AgentError::Retryable(
                 io_error.unwrap_or_else(|| "the stream returned no candidates".to_string()),
             ));
+        }
+        if let Some(e) = io_error {
+            // A read timeout mid-stream is not an end of body; say so loudly.
+            return Err(AgentError::Adapter(format!("stream ended abnormally: {e}")));
         }
         Ok(())
     }
