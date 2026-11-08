@@ -62,34 +62,30 @@ Release target is still pending: `rustup target add aarch64-unknown-linux-musl`,
   dropped, so no call goes unanswered. Controls reset at the **end** of a turn, not the start.
 - Plugin swaps take effect at the turn boundary, never mid-request.
 
-## Milestone 3: WASM plugins (next work)
+## Milestone 3: WASM plugins — done
 
-Order that works:
+- `src/plugin.rs` loads `plugin.wasm` with `wasmi` (pure Rust interpreter). The pinned
+  `wasm3` crate cannot build or run here: it needs clang+bindgen, ships x86-only bindings,
+  and emits native code that PRoot blocks. Fang chose `wasmi`; the ABI stayed as designed.
+- Capability gating: only granted names are wired; a plugin that declares an ungranted
+  import is refused at load with the capability named.
+- `src/profile.rs`: profile bundle, profile patch, home patch, `--patch` overlays stack
+  onto an empty row list; a patch overrides only the fields it names; last layer wins.
+- Hot swap: `/plugin list|load|unload|reload` (TUI), `:plugin` (plain). Changes queue and
+  apply at the turn boundary; unload runs `neon_dispose` and drops the instance.
+- Author crate: sibling repo `~/src/neon-plugin` (Fang's choice); fixture plugin builds to
+  `fixtures/plugins/echo/`. `sh ~/src/neon-plugin/scripts/build.sh` rebuilds the wasm.
 
-1. `src/plugin.rs` — load `plugin.wasm` with the `wasm3` interpreter, probe `neon_abi_version()`.
-2. Manifest `plugin.yaml` per plugin directory (`~/.config/neon/plugins/<id>/`): `id`, `tools`,
-   `capabilities`. Wire host imports **only** for granted names: `fs.read`, `fs.write`,
-   `bash.run`, `net.fetch`, `clock.now`, `log`. An ungranted name must not exist as an import.
-3. ABI: exports `neon_abi_version() -> i32`, `neon_tools() -> ptr` (JSON array of
-   `{name, description, parameters}`), `neon_handle(tool_index, args_ptr, args_len) -> ptr`
-   (JSON `{ok, content, error}`), `neon_dispose()`. Host imports `alloc(len) -> ptr`,
-   `free(ptr)`; strings cross as host-owned memory read as `(ptr, len)`.
-4. Profiles: `~/.config/neon/profiles/default.yaml` stacks ordered layers onto an empty row
-   list, then profile patch, home patch, `--patch` overlays. A patch targets a row `id` and
-   replaces it, inserts rows, or sets `disabled`. Registry rows need an `id` field now.
-5. Hot swap: `/plugin list|load|unload|reload` in the TUI, applied at the next turn boundary.
-   Unload runs disposers so tools, prompt sections, and interceptors unwind.
-6. Author crate `neon-plugin`, built with `cargo build --target wasm32-unknown-unknown`
-   (`rustup target add wasm32-unknown-unknown`). Commit a tiny fixture `.wasm` so tests need no
-   plugin build step.
-7. Tests: capability gating (ungranted import fails), unload removes a tool from the schema
-   list at the next turn, a fixture plugin that adds a tool and gets called by the loop.
+ABI v1: plugin exports `neon_abi_version/neon_tools/neon_handle/neon_dispose/neon_scratch_base`
+plus `memory` and `alloc/free` wrappers. Host imports live in module `neon` named
+`neon_alloc`, `neon_free`, and `neon_<capability with dots turned to underscores>`.
+Strings cross with a 4-byte little-endian length just before the payload; the bump
+allocator lives inside the plugin's own scratch array (`neon_scratch_base()`).
 
-Before coding, check the `wasm3` API you pin: how to declare module imports with `i32`
-parameters and how to read exported memory. If host-owned strings do not work cleanly, the
-fallback is one host-owned linear memory the plugin reads, still `(ptr, len)`.
+The debug wasmi interpreter needs a deep host stack: `.cargo/config.toml [env]
+RUST_MIN_STACK = "8000000"` is committed for tests and UI worker threads.
 
-## Milestone 4: sessions and compaction
+## Milestone 4: sessions and compaction (next work)
 
 - Flat append-only JSONL at `~/.local/state/neon/sessions/<id>.jsonl`, entries `user`,
   `assistant` (text + calls), `tool_result`, `model_change`, `compaction`, `meta`.
