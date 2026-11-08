@@ -18,8 +18,8 @@ A minimal coding agent in Rust, one binary, nothing installed to run it. One too
 - Network: `index.crates.io` works, `crates.io/api` returns 403 (fine, cargo uses the sparse
   index). DNS resolution fails occasionally — retry `cargo` if it reports
   "Could not resolve host".
-- No Gemini key yet. `~/.config/neon/config.yaml` is mode 0600 with `api_key: ""`. Everything
-  testable runs without a key.
+- Gemini key: filled in by Fang 2026-11-08, only in `~/.config/neon/config.yaml` (mode 0600).
+  Never log or echo it. First real-API turn succeeded: `gemini-3.5-flash-lite` is accepted.
 
 ## Current state
 
@@ -128,6 +128,12 @@ RUST_MIN_STACK = "8000000"` is committed for tests and UI worker threads.
   is rejected in a function declaration schema; schema `type` values must be upper case.
 - Gemini can close a stream without a TLS `close_notify`. Treat a bad close as end of body:
   `http::read_all` and `http::each_line` keep whatever arrived.
+- Gemini thinking models attach `thoughtSignature` to functionCall parts (a sibling of
+  `functionCall` on the part). The next request must echo it back as `thought_signature`, or
+  the follow-up request is rejected with HTTP 400 "Function call is missing a
+  thought_signature". It rides on `ToolCall.thought_sig`, is written to the session log as
+  `sig` in call entries, and parts with `"thought": true` are dropped (reasoning summaries
+  are not conversation text).
 - crossterm 0.29 has no `terminal::execute`; use the `execute!` macro. Enter arrives as
   carriage return, not newline.
 - ratatui diff frames make ANSI-stripped screen captures lose spaces. The smoke script compares
@@ -159,8 +165,8 @@ line; only a human verifies.
 
 ## Open questions for Fang
 
-1. Confirm the exact Gemini model id. `gemini-3.5-flash-lite` is Fang's naming and has not been
-   verified against the model list, because there is no key yet.
+1. ~~Confirm the exact Gemini model id~~ — `gemini-3.5-flash-lite` is accepted by the real
+   API (first turn ran a bash call on 2026-11-08).
 2. Whether milestone 3 ships the `neon-plugin` author crate in the same repo or a sibling repo.
 3. ~~When the static musl release should be built~~ — built after milestone 4; the
    outcome is recorded under "Static musl release".
