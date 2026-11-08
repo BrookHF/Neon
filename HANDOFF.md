@@ -142,6 +142,10 @@ RUST_MIN_STACK = "8000000"` is committed for tests and UI worker threads.
 - Transient LLM failures retry with progressive waits (1s, 2s, 4s, capped at 30s, default
   3 attempts via `llm_retries` in config.yaml): transport drops before response headers,
   HTTP 429/5xx, and empty streams. Never after the first emitted event — no duplicated text.
+- The wire sends `finishReason` (camelCase); the parser accepts both spellings, and a
+  `MAX_TOKENS` finish becomes a visible note in the loop. Requests now send
+  `maxOutputTokens` from `max_tokens` in config.yaml (default 16000). Without it, the API
+  default cap silently stops a large tool call (a whole HTML file) mid-intent.
 - Gemini thinking models attach `thoughtSignature` to functionCall parts (a sibling of
   `functionCall` on the part). The next request must echo it back as `thought_signature`, or
   the follow-up request is rejected with HTTP 400 "Function call is missing a
