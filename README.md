@@ -28,3 +28,10 @@ file mode `0600`. `cargo run` reads it. `neon --help` lists the flags.
 Milestone 1 is done: loop, one bash tool, streaming, fixture tests. Milestone 2 adds the
 ratatui TUI and steering. Milestone 3 adds WASM plugins, profiles, and hot swap. Milestone 4
 adds the session log, `--resume`, and compaction.
+
+## Wire notes
+
+Gemini v1beta takes the prompt as `systemInstruction`, not `system`, and rejects
+`additionalProperties` in a function declaration schema. Schema `type` values are sent upper
+_CASE. A stream can end without a TLS `close_notify`, so reads treat a bad close as end of
+body: `http::read_all` and `http::each_line` keep whatever arrived.
