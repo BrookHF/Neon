@@ -24,7 +24,7 @@ A minimal coding agent in Rust, one binary, nothing installed to run it. One too
 ## Current state
 
 ```
-commits   ed6e474 m1, c68f21b wire notes, 1c82cdf m2, ddf4e6b m3, (m4 pending hash)
+commits   ed6e474 m1, c68f21b wire notes, 1c82cdf m2, ddf4e6b m3, 5242ae8 m4
 files     src/{lib,main,agent,llm,http,tools,config,prompt,messages,error,ui,plugin,profile,session}.rs (4081 lines)
           fixtures/{demo,limit,steer,compact}.jsonl, fixtures/plugins/echo
           tests/loop.rs   scripts/tui-smoke.py
