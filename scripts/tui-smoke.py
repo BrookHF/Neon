@@ -273,7 +273,12 @@ def main():
         print(f"{name}: {'PASS' if ok else 'FAIL'}")
         if not ok:
             failed += 1
+            tail = norm(s)[-200:].replace("\n", " ")
             print(f"  screen tail: {norm(s)[-300:]}")
+            # GitHub Actions turns ::error:: lines into annotations, so the failed
+            # check names are readable from the public API without admin rights.
+            if os.environ.get("GITHUB_ACTIONS") == "true":
+                print(f"::error::smoke check failed: {name} | screen tail: {tail}")
     for f in session_files() - before:
         os.remove(os.path.join(SESSIONS, f))
     print("all checks passed" if failed == 0 else f"{failed} check(s) failed")
