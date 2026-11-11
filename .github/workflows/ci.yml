@@ -9,7 +9,9 @@ env:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # ubuntu-latest is migrating to Ubuntu 26 and its runner pool is backed up
+    # (runs sat in the queue for 25+ minutes with no job created). Pin an image.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       # Pin the toolchain to the version HANDOFF.md reports (rustc 1.99.1).
