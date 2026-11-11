@@ -54,6 +54,40 @@ python3 scripts/tui-smoke.py                  # drives the TUI on a pty, no key
 ~/.cargo/bin/cargo run -- --plain             # plain REPL
 ```
 
+## Testing
+
+Run everything offline: no API key, no network. Cargo is not on `PATH` here, so call
+`~/.cargo/bin/cargo` directly. `cargo test` builds `target/debug/neon`, which the smoke
+script needs; run `~/.cargo/bin/cargo build` first if you have not run the tests.
+
+```sh
+cd ~/src/neon
+
+# Format and lint (CI runs both; clippy must be clean)
+~/.cargo/bin/cargo fmt --check
+~/.cargo/bin/cargo clippy --all-targets -- -D warnings
+
+# Unit + integration tests: 47 lib tests (http URL split, Gemini body shape,
+# plugin ABI and capability grants, profile patches, session replay, command
+# layer, wrap), 3 CLI argument-parsing tests, 7 integration tests in tests/loop.rs
+# (tool turn replay, step limit, steering, abort mid-tool child kill, compaction,
+# resume append). All replay the fake ctx.llm with fixtures.
+~/.cargo/bin/cargo test
+
+# TUI smoke test: 30 checks driving target/debug/neon on a pty (fixture adapter),
+# covering render, commands, scrollback, steering, abort, session list, first-run
+# config template. Python stdlib only; no pip packages.
+python3 scripts/tui-smoke.py
+
+# Static musl release (portable aarch64 binary)
+~/.cargo/bin/rustup target add aarch64-unknown-linux-musl
+CC_aarch64_unknown_linux_musl=$(command -v gcc) \
+  ~/.cargo/bin/cargo build --release --target aarch64-unknown-linux-musl
+```
+
+CI (`.github/workflows/ci.yml`) runs the same four checks on push and pull request
+(pinned toolchain 1.99.1), plus the musl release build on an arm64 runner.
+
 ## Static musl release — done
 
 No musl-gcc exists here and apt cannot be used. ring's assembler needs no libc,

@@ -11,19 +11,21 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratatui::Terminal;
 
 use crate::agent::{Agent, Controls, Sink};
 use crate::config::Config;
 use crate::llm::Adapter;
 use crate::messages::{Message, ToolCall, estimate_tokens};
 use crate::plugin::PluginHost;
-use crate::session::{list as list_sessions, replay, resolve, Session};
+use crate::session::{Session, list as list_sessions, replay, resolve};
 use crate::tools::{Registry, ToolResult};
 
 /// Transcript rows kept in memory. Older rows drop from the top.
@@ -85,22 +87,16 @@ pub enum Command {
 
 /// Commands a person can type, in help order. Tab completes against this list.
 pub const COMMANDS: &[&str] = &[
-    "help",
-    "quit",
-    "tools",
-    "model",
-    "hist",
-    "compact",
-    "sessions",
-    "resume",
-    "new",
-    "plugin",
+    "help", "quit", "tools", "model", "hist", "compact", "sessions", "resume", "new", "plugin",
 ];
 
 /// Accept `/verb args` and `:verb args`. An empty verb is `help`.
 pub fn parse_command(text: &str) -> Command {
     let t = text.trim();
-    let body = t.strip_prefix('/').or_else(|| t.strip_prefix(':')).unwrap_or(t);
+    let body = t
+        .strip_prefix('/')
+        .or_else(|| t.strip_prefix(':'))
+        .unwrap_or(t);
     let (verb, rest) = match body.split_once(char::is_whitespace) {
         Some((v, r)) => (v, r.trim()),
         None => (body, ""),
@@ -183,7 +179,12 @@ impl Shared {
     }
 
     fn flush_live(&self) {
-        let text = self.live.lock().expect("live lock").drain(..).collect::<String>();
+        let text = self
+            .live
+            .lock()
+            .expect("live lock")
+            .drain(..)
+            .collect::<String>();
         if !text.is_empty() {
             self.push(Row::Text(text));
         }
@@ -196,7 +197,8 @@ impl Shared {
 
     fn scroll_down(&self, lines: usize) {
         let cur = self.scroll.load(Ordering::Relaxed);
-        self.scroll.store(cur.saturating_sub(lines.max(1)), Ordering::Relaxed);
+        self.scroll
+            .store(cur.saturating_sub(lines.max(1)), Ordering::Relaxed);
     }
 
     fn reset_scroll(&self) {
@@ -363,11 +365,7 @@ impl LineInput {
         if len <= width {
             return (self.text.clone(), self.cursor);
         }
-        let mut start = if self.cursor + 1 > width {
-            self.cursor + 1 - width
-        } else {
-            0
-        };
+        let mut start = (self.cursor + 1).saturating_sub(width);
         let end = (start + width).min(len);
         if end - start < width {
             start = end.saturating_sub(width);
@@ -389,7 +387,13 @@ fn fg(color: ratatui::style::Color) -> ratatui::style::Style {
 
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
-fn status_line(cfg: &Config, cwd: &PathBuf, shared: &Shared, registry: &Registry, tick: usize) -> String {
+fn status_line(
+    cfg: &Config,
+    cwd: &std::path::Path,
+    shared: &Shared,
+    registry: &Registry,
+    tick: usize,
+) -> String {
     let tokens = shared.tokens.load(Ordering::Relaxed);
     let budget = cfg.context_budget_tokens.max(1);
     let pct = (tokens * 100) / budget;
@@ -416,7 +420,11 @@ fn status_line(cfg: &Config, cwd: &PathBuf, shared: &Shared, registry: &Registry
     } else {
         ""
     };
-    let near = if pct >= 80 { " · near budget, /compact" } else { "" };
+    let near = if pct >= 80 {
+        " · near budget, /compact"
+    } else {
+        ""
+    };
     let scrolled = if scroll > 0 {
         format!(" · ↑{} scrolled (PgDown to latest)", scroll)
     } else {
@@ -460,12 +468,18 @@ fn render(
         let live = shared.live.lock().expect("live lock").clone();
         if !live.is_empty() {
             for l in wrap_to(&live, width) {
-                lines.push(Line::from(Span::styled(l, fg(ratatui::style::Color::White))));
+                lines.push(Line::from(Span::styled(
+                    l,
+                    fg(ratatui::style::Color::White),
+                )));
             }
         }
 
         let total = lines.len();
-        let scroll = shared.scroll.load(Ordering::Relaxed).min(total.saturating_sub(1));
+        let scroll = shared
+            .scroll
+            .load(Ordering::Relaxed)
+            .min(total.saturating_sub(1));
         let bottom = total.saturating_sub(scroll);
         let top = bottom.saturating_sub(height);
         let window: Vec<Line<'static>> = lines[top..bottom].to_vec();
@@ -508,7 +522,10 @@ fn render(
 
 #[cfg(test)]
 mod tests {
-    use super::{complete, help_lines, parse_command, suggested_command, wrap_to, Command, LineInput, Row, Shared};
+    use super::{
+        Command, LineInput, Row, Shared, complete, help_lines, parse_command, suggested_command,
+        wrap_to,
+    };
 
     #[test]
     fn cursor_moves_and_edits_at_position() {
@@ -565,11 +582,23 @@ mod tests {
         assert_eq!(parse_command("/help"), Command::Help);
         assert_eq!(parse_command(":quit"), Command::Quit);
         assert_eq!(parse_command(""), Command::Help);
-        assert_eq!(parse_command("/model gemini-3.5-flash"), Command::SetModel("gemini-3.5-flash".to_string()));
+        assert_eq!(
+            parse_command("/model gemini-3.5-flash"),
+            Command::SetModel("gemini-3.5-flash".to_string())
+        );
         assert_eq!(parse_command("/model"), Command::ShowModel);
-        assert_eq!(parse_command("/resume"), Command::Resume("last".to_string()));
-        assert_eq!(parse_command("/resume 7f-2-0"), Command::Resume("7f-2-0".to_string()));
-        assert_eq!(parse_command("/plugin list"), Command::Plugin("list".to_string()));
+        assert_eq!(
+            parse_command("/resume"),
+            Command::Resume("last".to_string())
+        );
+        assert_eq!(
+            parse_command("/resume 7f-2-0"),
+            Command::Resume("7f-2-0".to_string())
+        );
+        assert_eq!(
+            parse_command("/plugin list"),
+            Command::Plugin("list".to_string())
+        );
         assert_eq!(parse_command("/nope"), Command::Unknown("nope".to_string()));
     }
 
@@ -624,7 +653,10 @@ mod tests {
     #[test]
     fn error_rows_read_in_red() {
         assert_eq!(Row::Error("boom".to_string()).line(), "! boom");
-        assert_eq!(Row::Error("boom".to_string()).color(), ratatui::style::Color::Red);
+        assert_eq!(
+            Row::Error("boom".to_string()).color(),
+            ratatui::style::Color::Red
+        );
     }
 }
 
@@ -683,7 +715,11 @@ impl UiState {
                 let old = self.cfg.model();
                 self.cfg.set_model(&name);
                 // The log entry is written by the worker at the next turn, not here.
-                *self.shared.pending_model.lock().expect("pending model lock") = Some(name.clone());
+                *self
+                    .shared
+                    .pending_model
+                    .lock()
+                    .expect("pending model lock") = Some(name.clone());
                 self.shared.push(Row::Note(format!(
                     "model {old} -> {name} · the session log records it at the next turn"
                 )));
@@ -774,10 +810,10 @@ impl UiState {
                 Run::Stay
             }
             Command::Resume(target) => {
-                match resolve(&self.cfg.sessions_dir, &target)
-                    .and_then(|id| replay(&self.cfg.sessions_dir.join(format!("{id}.jsonl")))
-                        .map(|(msgs, meta)| (id, msgs, meta)))
-                {
+                match resolve(&self.cfg.sessions_dir, &target).and_then(|id| {
+                    replay(&self.cfg.sessions_dir.join(format!("{id}.jsonl")))
+                        .map(|(msgs, meta)| (id, msgs, meta))
+                }) {
                     Ok((id, msgs, meta)) => {
                         let model = meta
                             .as_ref()
@@ -830,11 +866,16 @@ impl UiState {
                 Run::Stay
             }
             Command::Plugin(rest) => {
-                match self.plugins.lock().map(|mut host| host.handle_command(&rest)) {
+                match self
+                    .plugins
+                    .lock()
+                    .map(|mut host| host.handle_command(&rest))
+                {
                     Ok(Ok(note)) => self.shared.push(Row::Note(note)),
                     Ok(Err(e)) => self.shared.push(Row::Error(format!("plugin: {e}"))),
-                    Err(_) => self.shared
-                        .push(Row::Error("plugin host is busy - wait for the turn".to_string())),
+                    Err(_) => self.shared.push(Row::Error(
+                        "plugin host is busy - wait for the turn".to_string(),
+                    )),
                 }
                 Run::Stay
             }
@@ -880,6 +921,9 @@ enum Run {
     Stop,
 }
 
+// The front end needs every seam it wires; splitting into a struct would move
+// ownership around for no gain.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     adapter: Arc<dyn Adapter>,
     registry: Arc<Registry>,
@@ -946,10 +990,8 @@ pub fn run(
                                     break;
                                 }
                             }
-                            KeyCode::Char('d') => {
-                                if !shared.running.load(Ordering::Relaxed) {
-                                    break;
-                                }
+                            KeyCode::Char('d') if !shared.running.load(Ordering::Relaxed) => {
+                                break;
                             }
                             _ => {}
                         }
@@ -1102,15 +1144,22 @@ impl Worker {
         let mut history = self.history.lock().expect("history lock");
         // A /model change is recorded here, at the turn boundary, by the thread that owns
         // the session log.
-        if let Some(m) = self.shared.pending_model.lock().expect("pending model lock").take() {
-            if let Err(e) = self.log.record_model_change(&m) {
-                self.shared.push(Row::Note(format!("session log failed: {e}")));
-            }
+        if let Some(m) = self
+            .shared
+            .pending_model
+            .lock()
+            .expect("pending model lock")
+            .take()
+            && let Err(e) = self.log.record_model_change(&m)
+        {
+            self.shared
+                .push(Row::Note(format!("session log failed: {e}")));
         }
         // The UI thread only drew the transcript row; the message enters history here.
         let msg = Message::user(&self.input);
         if let Err(e) = self.log.record_message(&msg) {
-            self.shared.push(Row::Note(format!("session log failed: {e}")));
+            self.shared
+                .push(Row::Note(format!("session log failed: {e}")));
         }
         history.push(msg);
         let outcome = agent.run_turn(&mut history);

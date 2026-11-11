@@ -147,9 +147,17 @@ mod tests {
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].id, "a");
         assert!(rows[0].disabled, "profile patch disables a");
-        assert_eq!(rows[0].grants, vec!["log".to_string()], "disable keeps grants");
+        assert_eq!(
+            rows[0].grants,
+            vec!["log".to_string()],
+            "disable keeps grants"
+        );
         assert_eq!(rows[1].id, "b");
-        assert_eq!(rows[1].grants, vec!["clock.now".to_string()], "overlay replaces b");
+        assert_eq!(
+            rows[1].grants,
+            vec!["clock.now".to_string()],
+            "overlay replaces b"
+        );
         assert_eq!(rows[2].id, "c");
         assert_eq!(rows[2].id, "c");
         assert_eq!(rows[1].path, expand_home("~/p/b"));

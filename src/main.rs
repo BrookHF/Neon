@@ -5,16 +5,16 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
+use neon::VERSION;
 use neon::agent::{Agent, Controls, StdioSink};
 use neon::config::{Config, default_path, ensure_template};
 use neon::llm::{Adapter, FixtureAdapter, GeminiAdapter};
 use neon::messages::{Message, estimate_tokens};
 use neon::plugin::PluginHost;
 use neon::profile;
-use neon::session::{human_age, list as list_sessions, replay, resolve, Session};
+use neon::session::{Session, human_age, list as list_sessions, replay, resolve};
 use neon::tools::{BashTool, PluginRow, Registry};
 use neon::ui;
-use neon::VERSION;
 
 const HELP: &str = r#"neon - a minimal coding agent
 
@@ -74,16 +74,16 @@ const FLAGS: &[&str] = &[
 
 /// The value that follows a flag. The message says what the flag needs.
 fn value(raw: &[String], i: usize, name: &str) -> Result<String, String> {
-    raw.get(i + 1)
-        .map(|v| v.clone())
-        .ok_or_else(|| format!("{name} needs a value (neon {name} <value>), or run it alone for the newest session"))
+    raw.get(i + 1).cloned().ok_or_else(|| {
+        format!(
+            "{name} needs a value (neon {name} <value>), or run it alone for the newest session"
+        )
+    })
 }
 
 /// A flag's value only when the next argument is not another flag.
 fn optional(raw: &[String], i: usize) -> Option<String> {
-    raw.get(i + 1)
-        .filter(|v| !v.starts_with('-'))
-        .map(|v| v.clone())
+    raw.get(i + 1).filter(|v| !v.starts_with('-')).cloned()
 }
 
 /// The closest known flag to a mistyped one, or None.
@@ -117,18 +117,16 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
                 a.fixture = Some(PathBuf::from(value(&raw, i, "--fixture")?));
                 i += 2;
             }
-            "--resume" => {
-                match optional(&raw, i) {
-                    Some(id) => {
-                        a.resume = Some(id);
-                        i += 2;
-                    }
-                    None => {
-                        a.resume = Some("last".to_string());
-                        i += 1;
-                    }
+            "--resume" => match optional(&raw, i) {
+                Some(id) => {
+                    a.resume = Some(id);
+                    i += 2;
                 }
-            }
+                None => {
+                    a.resume = Some("last".to_string());
+                    i += 1;
+                }
+            },
             "--sessions" => {
                 a.sessions = true;
                 i += 1;
@@ -289,16 +287,16 @@ fn main() -> ExitCode {
                 .and_then(|m| m.get("model"))
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
-            if args.model.is_none() {
-                if let Some(m) = &meta_model {
-                    cfg.set_model(m);
-                }
+            if args.model.is_none()
+                && let Some(m) = &meta_model
+            {
+                cfg.set_model(m);
             }
-            if meta_model.as_deref() != Some(cfg.model().as_str()) {
-                if let Err(e) = sess.record_model_change(&cfg.model()) {
-                    eprintln!("neon: {e}");
-                    return ExitCode::from(8);
-                }
+            if meta_model.as_deref() != Some(cfg.model().as_str())
+                && let Err(e) = sess.record_model_change(&cfg.model())
+            {
+                eprintln!("neon: {e}");
+                return ExitCode::from(8);
             }
             resumed = Some(msgs.len());
             history = msgs;
@@ -407,7 +405,17 @@ fn main() -> ExitCode {
         );
     }
 
-    match ui::run(adapter, Arc::new(registry), plugins, cfg, history, controls, cwd, log, resumed) {
+    match ui::run(
+        adapter,
+        Arc::new(registry),
+        plugins,
+        cfg,
+        history,
+        controls,
+        cwd,
+        log,
+        resumed,
+    ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("neon: the terminal failed: {e}");
@@ -418,6 +426,8 @@ fn main() -> ExitCode {
 }
 
 /// Run one plain-REPL command. Some(code) ends the REPL; None means it printed and stays.
+// The plain REPL needs every object a command can touch.
+#[allow(clippy::too_many_arguments)]
 fn plain_command(
     cmd: ui::Command,
     registry: &Registry,
@@ -573,6 +583,8 @@ fn plain_command(
     }
 }
 
+// The plain REPL needs every object a turn touches.
+#[allow(clippy::too_many_arguments)]
 fn plain_repl(
     adapter: Arc<dyn Adapter>,
     registry: Arc<Registry>,
@@ -596,7 +608,12 @@ fn plain_repl(
         session: Some(log.clone()),
     };
 
-    println!("neon {VERSION} · model {} · folder {} · session {}", cfg.model(), cwd.display(), log.id);
+    println!(
+        "neon {VERSION} · model {} · folder {} · session {}",
+        cfg.model(),
+        cwd.display(),
+        log.id
+    );
     if let Some(n) = resumed {
         println!("resumed {n} messages");
     }
@@ -606,7 +623,9 @@ fn plain_repl(
             default_path().display()
         );
     }
-    println!("commands: :help :quit :tools :model <name> :hist :compact :sessions :resume <id>|last :new :plugin <verb>");
+    println!(
+        "commands: :help :quit :tools :model <name> :hist :compact :sessions :resume <id>|last :new :plugin <verb>"
+    );
 
     let stdin_handle = stdin();
     loop {
@@ -683,13 +702,15 @@ mod tests {
         assert_eq!(a.task.as_deref(), Some("go"));
 
         assert!(parse_args(vec!["neon".to_string(), "-p".to_string()]).is_err());
-        assert!(parse_args(vec![
-            "neon".to_string(),
-            "-p".to_string(),
-            "one".to_string(),
-            "two".to_string()
-        ])
-        .is_err());
+        assert!(
+            parse_args(vec![
+                "neon".to_string(),
+                "-p".to_string(),
+                "one".to_string(),
+                "two".to_string()
+            ])
+            .is_err()
+        );
     }
 
     #[test]

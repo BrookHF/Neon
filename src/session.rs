@@ -133,17 +133,16 @@ pub fn resolve(dir: &Path, id_or_last: &str) -> Result<String> {
         for entry in std::fs::read_dir(dir)
             .map_err(|e| AgentError::Config(format!("{}: {e}", dir.display())))?
         {
-            let entry = entry
-                .map_err(|e| AgentError::Config(format!("{}: {e}", dir.display())))?;
+            let entry = entry.map_err(|e| AgentError::Config(format!("{}: {e}", dir.display())))?;
             let name = entry.file_name().to_string_lossy().to_string();
             if let Some(id) = name.strip_suffix(".jsonl") {
                 ids.push(id.to_string());
             }
         }
         ids.sort();
-        ids.last().cloned().ok_or_else(|| {
-            AgentError::Config(format!("{} has no sessions yet", dir.display()))
-        })
+        ids.last()
+            .cloned()
+            .ok_or_else(|| AgentError::Config(format!("{} has no sessions yet", dir.display())))
     } else {
         if id_or_last.is_empty()
             || !id_or_last
@@ -164,7 +163,9 @@ pub fn resolve(dir: &Path, id_or_last: &str) -> Result<String> {
 }
 
 pub fn summary_message(summary: &str) -> Message {
-    Message::user(&format!("Earlier conversation was compacted. Summary:\n{summary}"))
+    Message::user(&format!(
+        "Earlier conversation was compacted. Summary:\n{summary}"
+    ))
 }
 
 /// One row of the session list: enough to pick a session to resume.
@@ -181,11 +182,10 @@ pub struct SessionInfo {
 /// A file with no readable `meta` still shows up, with an empty model.
 pub fn list(dir: &Path, limit: usize) -> Result<Vec<SessionInfo>> {
     let mut rows: Vec<SessionInfo> = Vec::new();
-    for entry in std::fs::read_dir(dir)
-        .map_err(|e| AgentError::Config(format!("{}: {e}", dir.display())))?
+    for entry in
+        std::fs::read_dir(dir).map_err(|e| AgentError::Config(format!("{}: {e}", dir.display())))?
     {
-        let entry = entry
-            .map_err(|e| AgentError::Config(format!("{}: {e}", dir.display())))?;
+        let entry = entry.map_err(|e| AgentError::Config(format!("{}: {e}", dir.display())))?;
         let name = entry.file_name().to_string_lossy().to_string();
         let Some(id) = name.strip_suffix(".jsonl") else {
             continue;
@@ -202,20 +202,20 @@ pub fn list(dir: &Path, limit: usize) -> Result<Vec<SessionInfo>> {
                 continue;
             }
             entries += 1;
-            if entries == 1 {
-                if let Ok(v) = serde_json::from_str::<Value>(line) {
-                    model = v
-                        .get("model")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    cwd = v
-                        .get("cwd")
-                        .and_then(|c| c.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    secs = v.get("ts").and_then(|t| t.as_u64()).unwrap_or(0);
-                }
+            if entries == 1
+                && let Ok(v) = serde_json::from_str::<Value>(line)
+            {
+                model = v
+                    .get("model")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                cwd = v
+                    .get("cwd")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                secs = v.get("ts").and_then(|t| t.as_u64()).unwrap_or(0);
             }
         }
         rows.push(SessionInfo {
@@ -269,12 +269,27 @@ pub fn replay(path: &Path) -> Result<(Vec<Message>, Option<Value>)> {
             "meta" => meta = Some(v),
             "model_change" => {}
             "user" => pending.push(Part::Text(
-                v.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+                v.get("text")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string(),
             )),
             "tool_result" => pending.push(Part::Result {
-                call_id: v.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                name: v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                content: v.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string(),
+                call_id: v
+                    .get("id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                name: v
+                    .get("name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                content: v
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 is_error: v.get("err").and_then(|e| e.as_bool()).unwrap_or(false),
             }),
             "assistant" => {
@@ -292,13 +307,18 @@ pub fn replay(path: &Path) -> Result<(Vec<Message>, Option<Value>)> {
                 if let Some(calls) = v.get("calls").and_then(|c| c.as_array()) {
                     for c in calls {
                         parts.push(Part::Call(ToolCall {
-                            id: c.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                            name: c.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                            id: c
+                                .get("id")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            name: c
+                                .get("name")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string(),
                             args: c.get("args").cloned().unwrap_or(json!({})),
-                            thought_sig: c
-                                .get("sig")
-                                .and_then(|s| s.as_str())
-                                .map(str::to_string),
+                            thought_sig: c.get("sig").and_then(|s| s.as_str()).map(str::to_string),
                         }));
                     }
                 }
@@ -372,7 +392,10 @@ mod tests {
         .unwrap();
 
         let (msgs, meta) = replay(&s.path).unwrap();
-        assert_eq!(meta.as_ref().and_then(|m| m["model"].as_str()), Some("gemini-3.5-flash-lite"));
+        assert_eq!(
+            meta.as_ref().and_then(|m| m["model"].as_str()),
+            Some("gemini-3.5-flash-lite")
+        );
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0].text(), "run ls");
         assert_eq!(msgs[1].role, Role::Assistant);

@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pin the toolchain to the version HANDOFF.md reports (rustc 1.99.1).
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format check
+        run: cargo fmt --check
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Unit and integration tests (fixture replay, no key, no network)
+        run: cargo test
+      # scripts/tui-smoke.py drives target/debug/neon on a pty.
+      # It needs no pip packages: only Python stdlib (pty, termios, select).
+      - name: Debug build for the TUI smoke test
+        run: cargo build
+      - name: TUI smoke test (30 pty checks, no key)
+        run: python3 scripts/tui-smoke.py
+
+  release-musl:
+    # arm64 runner: its gcc is already an aarch64 compiler, so the host gcc
+    # works as CC_aarch64_unknown_linux_musl (same trick as the phone build;
+    # ring's assembler needs no libc, and rustls stays on the ring provider,
+    # so no cmake is needed for a static musl binary).
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: aarch64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - name: Static release build
+        run: CC_aarch64_unknown_linux_musl=$(command -v gcc) cargo build --release --target aarch64-unknown-linux-musl
+      - name: Upload the static binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: neon-aarch64-linux-musl
+          path: target/aarch64-unknown-linux-musl/release/neon

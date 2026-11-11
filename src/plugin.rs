@@ -16,7 +16,10 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Value, json};
 use yaml_rust2::YamlLoader;
 
-use wasmi::{AsContext, AsContextMut, Caller, Engine, Instance, Linker, Memory, Module, Store, StoreContext, Val};
+use wasmi::{
+    AsContext, AsContextMut, Caller, Engine, Instance, Linker, Memory, Module, Store, StoreContext,
+    Val,
+};
 
 use crate::error::{AgentError, Result};
 use crate::http;
@@ -31,7 +34,14 @@ pub const SCRATCH_HEAD: u32 = 4;
 pub const HOST_MODULE: &str = "neon";
 
 /// Host services a manifest can name. An ungranted one is never wired as an import.
-pub const CAPABILITIES: [&str; 6] = ["fs.read", "fs.write", "bash.run", "net.fetch", "clock.now", "log"];
+pub const CAPABILITIES: [&str; 6] = [
+    "fs.read",
+    "fs.write",
+    "bash.run",
+    "net.fetch",
+    "clock.now",
+    "log",
+];
 
 /// One plugin row: from a profile layer or a `/plugin load` action. Paths may start with `~/`.
 #[derive(Clone, Debug)]
@@ -115,7 +125,11 @@ fn write_string(caller: &mut Caller<'_, u32>, text: &str) -> Result<u32> {
         .and_then(|e| e.into_memory())
         .ok_or_else(|| adapter("plugin exports no memory"))?;
     memory
-        .write(caller.as_context_mut(), (ptr - SCRATCH_HEAD) as usize, &len_bytes)
+        .write(
+            caller.as_context_mut(),
+            (ptr - SCRATCH_HEAD) as usize,
+            &len_bytes,
+        )
         .map_err(|e| adapter(format!("cannot write service length: {e}")))?;
     memory
         .write(caller.as_context_mut(), ptr as usize, payload)
@@ -131,7 +145,10 @@ fn import_name(cap: &str) -> String {
 
 /// The capability an import name refers back to.
 fn cap_of(import: &str) -> String {
-    import.strip_prefix("neon_").unwrap_or(import).replace('_', ".")
+    import
+        .strip_prefix("neon_")
+        .unwrap_or(import)
+        .replace('_', ".")
 }
 
 struct PluginState {
@@ -171,15 +188,19 @@ impl Plugin {
             .get_func(&*store, name)
             .ok_or_else(|| adapter(format!("export {name} is missing")))?;
         let mut results = [Val::I32(0)];
-        func
-            .call(store, args, &mut results)
+        func.call(store, args, &mut results)
             .map_err(|e| adapter(format!("{name} failed: {e}")))?;
         results[0]
             .i32()
             .ok_or_else(|| adapter(format!("{name} did not return an integer")))
     }
 
-    fn call_void(instance: &Instance, store: &mut Store<u32>, name: &str, args: &[Val]) -> Result<()> {
+    fn call_void(
+        instance: &Instance,
+        store: &mut Store<u32>,
+        name: &str,
+        args: &[Val],
+    ) -> Result<()> {
         let func = instance
             .get_func(&*store, name)
             .ok_or_else(|| adapter(format!("export {name} is missing")))?;
@@ -234,7 +255,11 @@ impl Plugin {
             instance,
             store,
             "neon_handle",
-            &[Val::I32(index as i32), Val::I32(ptr), Val::I32(args.len() as i32)],
+            &[
+                Val::I32(index as i32),
+                Val::I32(ptr),
+                Val::I32(args.len() as i32),
+            ],
         )
         .map_err(|e| adapter(format!("{}: {e}", self.id)))?;
         if reply_ptr < 0 {
@@ -286,8 +311,7 @@ impl Plugin {
         if manifest.id != row.id {
             return Err(AgentError::Config(format!(
                 "row id {} does not match manifest id {}",
-                row.id,
-                manifest.id
+                row.id, manifest.id
             )));
         }
         for cap in &manifest.capabilities {
@@ -344,7 +368,11 @@ impl Plugin {
                     }
                     let len_bytes = len.to_le_bytes();
                     if memory
-                        .write(caller.as_context_mut(), (ptr - SCRATCH_HEAD) as usize, &len_bytes)
+                        .write(
+                            caller.as_context_mut(),
+                            (ptr - SCRATCH_HEAD) as usize,
+                            &len_bytes,
+                        )
                         .is_err()
                     {
                         return -1;
@@ -355,7 +383,11 @@ impl Plugin {
             )
             .map_err(|e| adapter(format!("alloc import: {e}")))?;
         linker
-            .func_wrap(HOST_MODULE, "neon_free", |_caller: Caller<'_, u32>, _ptr: i32| {})
+            .func_wrap(
+                HOST_MODULE,
+                "neon_free",
+                |_caller: Caller<'_, u32>, _ptr: i32| {},
+            )
             .map_err(|e| adapter(format!("free import: {e}")))?;
 
         // Wire a service only when the row grants it: an ungranted name is never wired.
@@ -532,7 +564,11 @@ fn wire_service(
                             Err(_) => return -1,
                         };
                         let call_id = format!("plugin-bash-{}", std::process::id());
-                        let result = crate::tools::BashTool.run(&json!({ "command": command }), &ctx, &call_id);
+                        let result = crate::tools::BashTool.run(
+                            &json!({ "command": command }),
+                            &ctx,
+                            &call_id,
+                        );
                         match write_string(&mut caller, &result.content) {
                             Ok(p) => p as i32,
                             Err(_) => -1,
@@ -603,7 +639,10 @@ impl Tool for WasmTool {
         self.schema.parameters.clone()
     }
     fn run(&self, args: &Value, _ctx: &ToolCtx, _call_id: &str) -> ToolResult {
-        match self.plugin.call_handle(self.index, args.to_string().as_bytes()) {
+        match self
+            .plugin
+            .call_handle(self.index, args.to_string().as_bytes())
+        {
             Err(e) => ToolResult {
                 content: format!("{}: {e}", self.plugin_id()),
                 is_error: true,
@@ -691,7 +730,9 @@ impl PluginHost {
                 }
             }
             "load" => {
-                let id = parts.next().ok_or_else(|| adapter("plugin load needs an id"))?;
+                let id = parts
+                    .next()
+                    .ok_or_else(|| adapter("plugin load needs an id"))?;
                 let dir = crate::profile::plugin_dir().join(id);
                 let manifest = Manifest::load(&dir)?;
                 self.queue(Row {
@@ -707,16 +748,22 @@ impl PluginHost {
                 ))
             }
             "unload" => {
-                let id = parts.next().ok_or_else(|| adapter("plugin unload needs an id"))?;
+                let id = parts
+                    .next()
+                    .ok_or_else(|| adapter("plugin unload needs an id"))?;
                 self.queue_unload(id);
                 Ok(format!("queued unload of {id}; applies at the next turn"))
             }
             "reload" => {
-                let id = parts.next().ok_or_else(|| adapter("plugin reload needs an id"))?;
+                let id = parts
+                    .next()
+                    .ok_or_else(|| adapter("plugin reload needs an id"))?;
                 self.queue_reload(id)?;
                 Ok(format!("queued reload of {id}; applies at the next turn"))
             }
-            other => Err(AgentError::Config(format!("unknown plugin command: {other}"))),
+            other => Err(AgentError::Config(format!(
+                "unknown plugin command: {other}"
+            ))),
         }
     }
 
@@ -740,7 +787,13 @@ impl PluginHost {
                 self.rows.retain(|r| r.id != row.id);
                 continue;
             }
-            let plugin = Plugin::load(&self.engine, &row.path, &row, self.ctx.clone(), self.log.clone())?;
+            let plugin = Plugin::load(
+                &self.engine,
+                &row.path,
+                &row,
+                self.ctx.clone(),
+                self.log.clone(),
+            )?;
             if let Some(old) = self.loaded.remove(&row.id) {
                 old.dispose();
             }
@@ -780,7 +833,10 @@ mod tests {
         })
     }
 
-    fn logged() -> (Arc<dyn Fn(&str) + Send + Sync>, Arc<Mutex<Vec<String>>>) {
+    /// The log sink plus the collected lines, as tests use them.
+    type LogSink = (Arc<dyn Fn(&str) + Send + Sync>, Arc<Mutex<Vec<String>>>);
+
+    fn logged() -> LogSink {
         let lines = Arc::new(Mutex::new(Vec::new()));
         let sink = lines.clone();
         (
@@ -835,8 +891,14 @@ mod tests {
     fn handle_round_trips_and_log_service_runs() {
         let dir = fixture_dir();
         let (log, lines) = logged();
-        let plugin = Plugin::load(&Engine::default(), &dir, &full_row(dir.clone()), test_ctx(), log)
-            .expect("a granted row loads");
+        let plugin = Plugin::load(
+            &Engine::default(),
+            &dir,
+            &full_row(dir.clone()),
+            test_ctx(),
+            log,
+        )
+        .expect("a granted row loads");
         let reply = plugin
             .call_handle(0, json!({ "text": "hello" }).to_string().as_bytes())
             .expect("neon_handle answers");
@@ -870,7 +932,11 @@ mod tests {
         let v: Value = serde_json::from_str(&reply).expect("the reply is JSON");
         assert_eq!(v["ok"], json!(true));
         assert!(
-            v["content"].as_str().unwrap_or("").chars().all(|c| c.is_ascii_digit()),
+            v["content"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .all(|c| c.is_ascii_digit()),
             "content: {}",
             v["content"]
         );

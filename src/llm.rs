@@ -78,11 +78,11 @@ impl GeminiAdapter {
                 return false;
             }
             last_data = std::time::Instant::now();
-            if let Some(path) = &dump {
-                if let Err(e) = crate::append_line(std::path::Path::new(path), payload) {
-                    failure.get_or_insert_with(|| format!("wire dump: {e}"));
-                    return false;
-                }
+            if let Some(path) = &dump
+                && let Err(e) = crate::append_line(std::path::Path::new(path), payload)
+            {
+                failure.get_or_insert_with(|| format!("wire dump: {e}"));
+                return false;
             }
             let value: Value = match serde_json::from_str(payload) {
                 Ok(v) => v,
@@ -96,7 +96,7 @@ impl GeminiAdapter {
                 return false;
             }
             if let Some(msg) = parse_chunk(&value, sink, &mut call_index) {
-                failure.get_or_insert_with(|| msg);
+                failure.get_or_insert(msg);
                 return false;
             }
             saw_any = true;
@@ -112,9 +112,9 @@ impl GeminiAdapter {
         }
         if !saw_any {
             // An empty stream (bad close, server hiccup) is worth waiting for.
-            return Err(AgentError::Retryable(
-                io_error.unwrap_or_else(|| "the stream returned no candidates".to_string()),
-            ));
+            return Err(AgentError::Retryable(io_error.unwrap_or_else(|| {
+                "the stream returned no candidates".to_string()
+            })));
         }
         if let Some(e) = io_error {
             // A read timeout mid-stream is not an end of body; say so loudly.
@@ -163,8 +163,7 @@ impl FixtureAdapter {
             .map_err(|e| AgentError::Config(format!("{}: {e}", path.display())))?;
         Ok(FixtureAdapter {
             lines: Mutex::new(
-                text
-                    .lines()
+                text.lines()
                     .filter(|l| !l.trim().is_empty())
                     .map(str::to_string)
                     .collect(),
@@ -192,7 +191,11 @@ impl Adapter for FixtureAdapter {
 }
 
 /// Turn one stream chunk into events. Returns an error message if the chunk is malformed.
-fn parse_chunk(value: &Value, sink: &mut dyn FnMut(Event), call_index: &mut usize) -> Option<String> {
+fn parse_chunk(
+    value: &Value,
+    sink: &mut dyn FnMut(Event),
+    call_index: &mut usize,
+) -> Option<String> {
     let candidates = match value.get("candidates").and_then(|c| c.as_array()) {
         Some(c) => c,
         None => return Some("chunk has no candidates".to_string()),
@@ -211,7 +214,11 @@ fn parse_chunk(value: &Value, sink: &mut dyn FnMut(Event), call_index: &mut usiz
     if let Some(parts) = parts {
         for part in parts {
             // Thinking-model reasoning summaries are not conversation text; drop them.
-            if part.get("thought").and_then(|t| t.as_bool()).unwrap_or(false) {
+            if part
+                .get("thought")
+                .and_then(|t| t.as_bool())
+                .unwrap_or(false)
+            {
                 continue;
             }
             if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
@@ -287,7 +294,11 @@ fn gemini_body(req: &Request) -> Value {
     if let Some(m) = req.max_tokens {
         gen_config["maxOutputTokens"] = json!(m);
     }
-    if gen_config.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
+    if gen_config
+        .as_object()
+        .map(|o| !o.is_empty())
+        .unwrap_or(false)
+    {
         body["generationConfig"] = gen_config;
     }
     body
@@ -393,20 +404,34 @@ mod tests {
     #[test]
     fn body_shape() {
         let body = gemini_body(&req());
-        assert_eq!(body["systemInstruction"]["parts"][0]["text"], "You are Neon.");
+        assert_eq!(
+            body["systemInstruction"]["parts"][0]["text"],
+            "You are Neon."
+        );
         assert_eq!(body["contents"][0]["role"], "user");
         assert_eq!(body["contents"][1]["role"], "model");
-        assert_eq!(body["contents"][1]["parts"][1]["functionCall"]["name"], "bash");
-        assert_eq!(body["contents"][1]["parts"][1]["thought_signature"], "sig-1");
+        assert_eq!(
+            body["contents"][1]["parts"][1]["functionCall"]["name"],
+            "bash"
+        );
+        assert_eq!(
+            body["contents"][1]["parts"][1]["thought_signature"],
+            "sig-1"
+        );
         assert_eq!(
             body["contents"][2]["parts"][0]["functionResponse"]["name"],
             "bash"
         );
         assert_eq!(body["tools"][0]["function_declarations"][0]["name"], "bash");
-        assert_eq!(body["tools"][0]["function_declarations"][0]["parameters"]["type"], "OBJECT");
-        assert!(body["tools"][0]["function_declarations"][0]["parameters"]
-            .get("additionalProperties")
-            .is_none());
+        assert_eq!(
+            body["tools"][0]["function_declarations"][0]["parameters"]["type"],
+            "OBJECT"
+        );
+        assert!(
+            body["tools"][0]["function_declarations"][0]["parameters"]
+                .get("additionalProperties")
+                .is_none()
+        );
         assert_eq!(body["generationConfig"]["maxOutputTokens"], 2048);
     }
 

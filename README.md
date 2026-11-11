@@ -17,6 +17,26 @@ cargo test                   # fixture replay, offline
 python3 scripts/tui-smoke.py # drives the TUI on a pty, no key
 ```
 
+## Testing
+
+Everything runs offline: no API key, no network. GitHub Actions
+(`.github/workflows/ci.yml`) runs these checks on every push and pull request,
+with `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` added.
+
+```sh
+cargo test                    # unit + integration tests (fixture replay)
+python3 scripts/tui-smoke.py  # 30 pty checks on target/debug/neon; Python stdlib only
+
+# Static musl release (portable aarch64 binary). Host gcc works as the cross
+# compiler because ring's assembler needs no libc.
+CC_aarch64_unknown_linux_musl=$(command -v gcc) \
+  cargo build --release --target aarch64-unknown-linux-musl
+```
+
+On the phone build box, cargo is not on `PATH`: call `~/.cargo/bin/cargo` directly,
+and run one cargo command at a time (`CARGO_BUILD_JOBS=1`). Never run clippy or a
+release build there; GitHub Actions runs them.
+
 ## Use it
 
 First run writes a commented starter file at `~/.config/neon/config.yaml` (mode `0600`) and tells

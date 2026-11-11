@@ -14,7 +14,8 @@ pub struct Response {
 
 /// Either a TLS connection or a plain one, so a local proxy can be used later.
 enum Stream {
-    Tls(TlsStream),
+    // Boxed so the enum stays small; the TLS connection is large.
+    Tls(Box<TlsStream>),
     Plain(TcpStream),
 }
 
@@ -91,11 +92,7 @@ pub fn split_url(url: &str) -> Result<(String, u16, String)> {
         None => "/".to_string(),
     };
     let port = if scheme == "https" { 443 } else { 80 };
-    let host = host_part
-        .split(':')
-        .next()
-        .unwrap_or(host_part)
-        .to_string();
+    let host = host_part.split(':').next().unwrap_or(host_part).to_string();
     Ok((host, port, path))
 }
 
@@ -122,8 +119,10 @@ fn connect(host: &str, port: u16, tls: bool) -> Result<Stream> {
         .map_err(|e| AgentError::Http(format!("bad server name: {e}")))?;
     let conn = rustls::ClientConnection::new(Arc::new(cfg), name)
         .map_err(|e| AgentError::Http(format!("tls: {e}")))?;
-    let mut stream = Stream::Tls(TlsStream { io, conn });
-    stream.flush().map_err(|e| AgentError::Http(format!("handshake: {e}")))?;
+    let mut stream = Stream::Tls(Box::new(TlsStream { io, conn }));
+    stream
+        .flush()
+        .map_err(|e| AgentError::Http(format!("handshake: {e}")))?;
     Ok(stream)
 }
 
@@ -192,7 +191,10 @@ fn request(method: &str, url: &str, headers: &[(&str, &str)], body: &[u8]) -> Re
 }
 
 /// Read status line and headers, and return bytes already read past the header block.
-fn read_head<R: Read>(r: &mut R) -> io::Result<(u16, Vec<(String, String)>, Vec<u8>)> {
+/// Status, header pairs, and any body bytes already read with the head.
+type Head = (u16, Vec<(String, String)>, Vec<u8>);
+
+fn read_head<R: Read>(r: &mut R) -> io::Result<Head> {
     let mut buf: Vec<u8> = Vec::new();
     let mut tmp = [0u8; 4096];
     loop {
@@ -205,7 +207,10 @@ fn read_head<R: Read>(r: &mut R) -> io::Result<(u16, Vec<(String, String)>, Vec<
             break;
         }
         if buf.len() > 64 * 1024 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "header block too large"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "header block too large",
+            ));
         }
     }
     let sep = find(&buf, b"\r\n\r\n")
@@ -335,17 +340,12 @@ pub fn each_line<R: Read>(r: &mut R, mut cb: impl FnMut(&str) -> bool) -> Option
                 break;
             }
         }
-        loop {
-            match find(&buf, b"\n") {
-                Some(pos) => {
-                    let line = buf[..pos].to_vec();
-                    buf.drain(..pos + 1);
-                    if !cb(std::str::from_utf8(&line).unwrap_or("")) {
-                        stopped = true;
-                        break;
-                    }
-                }
-                None => break,
+        while let Some(pos) = find(&buf, b"\n") {
+            let line = buf[..pos].to_vec();
+            buf.drain(..pos + 1);
+            if !cb(std::str::from_utf8(&line).unwrap_or("")) {
+                stopped = true;
+                break;
             }
         }
         if stopped {
@@ -379,9 +379,15 @@ mod tests {
     #[test]
     fn url_split() {
         let (host, port, path) = split_url("https://example.com/v1/a?b=1").unwrap();
-        assert_eq!((host.as_str(), port, path.as_str()), ("example.com", 443, "/v1/a?b=1"));
+        assert_eq!(
+            (host.as_str(), port, path.as_str()),
+            ("example.com", 443, "/v1/a?b=1")
+        );
         let (host, port, path) = split_url("http://127.0.0.1:8080/v1").unwrap();
-        assert_eq!((host.as_str(), port, path.as_str()), ("127.0.0.1", 80, "/v1"));
+        assert_eq!(
+            (host.as_str(), port, path.as_str()),
+            ("127.0.0.1", 80, "/v1")
+        );
     }
 
     #[test]

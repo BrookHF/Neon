@@ -13,7 +13,7 @@ use crate::llm::Adapter;
 use crate::messages::{Event, Message, Part, Request, Role, ToolCall, estimate_tokens};
 use crate::plugin::PluginHost;
 use crate::prompt::build_system;
-use crate::session::{summary_message, Session};
+use crate::session::{Session, summary_message};
 use crate::tools::{Registry, ToolCtx, ToolResult};
 
 /// Where the loop reports progress. Plain stdio, the TUI, or a test buffer.
@@ -65,14 +65,18 @@ impl VecSink {
 
 impl Sink for VecSink {
     fn text(&self, chunk: &str) {
-        self.lines.lock().expect("sink lock").push(chunk.to_string());
-    }
-
-    fn tool_call(&self, call: &ToolCall) {
         self.lines
             .lock()
             .expect("sink lock")
-            .push(format!("-> {} {}", call.name, compact(&call.args)));
+            .push(chunk.to_string());
+    }
+
+    fn tool_call(&self, call: &ToolCall) {
+        self.lines.lock().expect("sink lock").push(format!(
+            "-> {} {}",
+            call.name,
+            compact(&call.args)
+        ));
     }
 
     fn tool_result(&self, _call: &ToolCall, result: &ToolResult) {
@@ -84,7 +88,10 @@ impl Sink for VecSink {
     }
 
     fn note(&self, msg: &str) {
-        self.lines.lock().expect("sink lock").push(format!("[{msg}]"));
+        self.lines
+            .lock()
+            .expect("sink lock")
+            .push(format!("[{msg}]"));
     }
 }
 
@@ -149,10 +156,10 @@ pub struct Agent {
 impl Agent {
     pub fn run_turn(&self, history: &mut Vec<Message>) -> Result<TurnOutcome> {
         // Plugin swaps take effect at the turn boundary, never mid-request.
-        if let Ok(mut host) = self.plugins.lock() {
-            if let Err(e) = host.apply(&self.registry) {
-                self.sink.note(&format!("plugin change failed: {e}"));
-            }
+        if let Ok(mut host) = self.plugins.lock()
+            && let Err(e) = host.apply(&self.registry)
+        {
+            self.sink.note(&format!("plugin change failed: {e}"));
         }
         let outcome = self.run_inner(history);
         // Leftover steering and the abort switch belong to the turn that just ended.
@@ -162,10 +169,10 @@ impl Agent {
 
     /// Push a message to the history and append its entries to the session log.
     fn push(&self, history: &mut Vec<Message>, msg: Message) {
-        if let Some(s) = &self.session {
-            if let Err(e) = s.record_message(&msg) {
-                self.sink.note(&format!("session log failed: {e}"));
-            }
+        if let Some(s) = &self.session
+            && let Err(e) = s.record_message(&msg)
+        {
+            self.sink.note(&format!("session log failed: {e}"));
         }
         history.push(msg);
     }
@@ -218,7 +225,9 @@ impl Agent {
         })?;
         let summary = summary.trim().to_string();
         if summary.is_empty() {
-            return Err(AgentError::Adapter("compaction returned no summary".to_string()));
+            return Err(AgentError::Adapter(
+                "compaction returned no summary".to_string(),
+            ));
         }
 
         let replaced = history.len();
@@ -299,10 +308,13 @@ impl Agent {
             })?;
 
             if calls.is_empty() {
-                self.push(history, Message {
-                    role: Role::Assistant,
-                    parts: vec![Part::Text(text.clone())],
-                });
+                self.push(
+                    history,
+                    Message {
+                        role: Role::Assistant,
+                        parts: vec![Part::Text(text.clone())],
+                    },
+                );
                 final_text = text;
                 return Ok(TurnOutcome {
                     steps,
@@ -343,10 +355,13 @@ impl Agent {
             for (call, _) in &executed {
                 parts.push(Part::Call(call.clone()));
             }
-            self.push(history, Message {
-                role: Role::Assistant,
-                parts,
-            });
+            self.push(
+                history,
+                Message {
+                    role: Role::Assistant,
+                    parts,
+                },
+            );
 
             let mut results: Vec<Part> = Vec::new();
             for (call, result) in &executed {
@@ -361,10 +376,13 @@ impl Agent {
                 if let Some(msg) = &steering {
                     results.push(Part::Text(msg.clone()));
                 }
-                self.push(history, Message {
-                    role: Role::User,
-                    parts: results,
-                });
+                self.push(
+                    history,
+                    Message {
+                        role: Role::User,
+                        parts: results,
+                    },
+                );
             }
             if aborted {
                 self.sink.note("aborted");
@@ -400,8 +418,7 @@ fn compact(value: &Value) -> String {
 }
 
 fn first_line(text: &str) -> String {
-    text
-        .lines()
+    text.lines()
         .find(|l| !l.trim().is_empty())
         .unwrap_or("")
         .to_string()

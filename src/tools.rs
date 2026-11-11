@@ -60,17 +60,26 @@ impl Registry {
 
     pub fn add(&self, tool: Box<dyn Tool>, row: PluginRow) {
         let tool: Arc<dyn Tool> = tool.into();
-        self.tools.lock().expect("registry tools lock").push((tool, row));
+        self.tools
+            .lock()
+            .expect("registry tools lock")
+            .push((tool, row));
     }
 
     pub fn add_interceptor(&self, i: Interceptor, row: PluginRow) {
         let i: Arc<Interceptor> = Arc::new(i);
-        self.interceptors.lock().expect("registry interceptor lock").push((i, row));
+        self.interceptors
+            .lock()
+            .expect("registry interceptor lock")
+            .push((i, row));
     }
 
     /// Drop every row a plugin contributed. Used by unload and by re-registration.
     pub fn remove_all_plugin_rows(&self) {
-        self.tools.lock().expect("registry tools lock").retain(|(_, r)| !matches!(r, PluginRow::Plugin(_)));
+        self.tools
+            .lock()
+            .expect("registry tools lock")
+            .retain(|(_, r)| !matches!(r, PluginRow::Plugin(_)));
         self.interceptors
             .lock()
             .expect("registry interceptor lock")
@@ -330,9 +339,7 @@ pub fn excerpt(bytes: &[u8], cap: usize) -> String {
     let dropped = bytes.len() - cap;
     let head = String::from_utf8_lossy(&bytes[..head_len]);
     let tail = String::from_utf8_lossy(&bytes[bytes.len() - tail_len..]);
-    format!(
-        "{head}\n...[{dropped} bytes dropped; the raw file has the full output]...\n{tail}"
-    )
+    format!("{head}\n...[{dropped} bytes dropped; the raw file has the full output]...\n{tail}")
 }
 
 #[cfg(test)]
@@ -376,7 +383,10 @@ mod tests {
         assert!(result.is_error);
         assert!(result.content.contains("killed by user"));
         assert!(!result.content.contains("late"));
-        assert!(elapsed < Duration::from_secs(3), "child was not killed: {elapsed:?}");
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "child was not killed: {elapsed:?}"
+        );
     }
 
     #[test]
@@ -428,7 +438,13 @@ mod tests {
         registry.add(Box::new(BashTool), PluginRow::Core);
         registry.add_interceptor(
             Box::new(|call, next| {
-                if call.args.get("command").and_then(|c| c.as_str()).unwrap_or("").contains("rm -rf") {
+                if call
+                    .args
+                    .get("command")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .contains("rm -rf")
+                {
                     ToolResult {
                         content: "blocked by policy".to_string(),
                         is_error: true,

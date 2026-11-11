@@ -28,13 +28,21 @@ fn harness(
     fixture_name: &str,
     max_steps: usize,
     budget: usize,
-) -> (Agent, Arc<VecSink>, Arc<Controls>, std::path::PathBuf, Arc<Session>) {
+) -> (
+    Agent,
+    Arc<VecSink>,
+    Arc<Controls>,
+    std::path::PathBuf,
+    Arc<Session>,
+) {
     let dir = workdir(name);
-    let mut cfg = Config::default();
-    cfg.spill_dir = dir.join("spill");
-    cfg.max_steps = max_steps;
-    cfg.context_budget_tokens = budget;
-    cfg.sessions_dir = dir.join("sessions");
+    let cfg = Config {
+        spill_dir: dir.join("spill"),
+        max_steps,
+        context_budget_tokens: budget,
+        sessions_dir: dir.join("sessions"),
+        ..Config::default()
+    };
     let registry = Registry::new();
     registry.add(Box::new(BashTool), PluginRow::Core);
     let sink = Arc::new(VecSink::default());
@@ -72,7 +80,10 @@ fn replays_a_tool_turn() {
     assert_eq!(outcome.steps, 2);
     assert!(!outcome.stopped_at_limit);
     assert!(!outcome.aborted);
-    assert_eq!(outcome.text, "It printed hello from neon. Nothing else to do.");
+    assert_eq!(
+        outcome.text,
+        "It printed hello from neon. Nothing else to do."
+    );
 
     assert_eq!(history.len(), 4);
     assert_eq!(history[1].role, Role::Assistant);
@@ -166,7 +177,8 @@ fn abort_mid_tool_kills_the_child_and_ends_the_turn() {
     )
     .unwrap();
 
-    let (agent, sink, controls, _dir, _log) = harness("midabort", "midabort-tmp.jsonl", 24, 200_000);
+    let (agent, sink, controls, _dir, _log) =
+        harness("midabort", "midabort-tmp.jsonl", 24, 200_000);
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(300));
         controls.abort();
@@ -179,7 +191,10 @@ fn abort_mid_tool_kills_the_child_and_ends_the_turn() {
 
     assert!(outcome.aborted);
     assert_eq!(outcome.steps, 1);
-    assert!(elapsed < std::time::Duration::from_secs(3), "child was not killed: {elapsed:?}");
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "child was not killed: {elapsed:?}"
+    );
     assert!(sink.dump().contains("[aborted]"));
 
     // The result carries the kill note, and the child never printed "late".
@@ -194,7 +209,8 @@ fn abort_mid_tool_kills_the_child_and_ends_the_turn() {
 #[test]
 fn compaction_summarizes_the_oldest_span_and_keeps_originals_in_the_log() {
     let (agent, sink, _controls, dir, log) = harness("compact", "compact.jsonl", 24, 100);
-    log.record_message(&Message::user("print a long list")).unwrap();
+    log.record_message(&Message::user("print a long list"))
+        .unwrap();
     let mut history = vec![Message::user("print a long list")];
     let outcome = agent.run_turn(&mut history).unwrap();
 
