@@ -393,6 +393,7 @@ fn status_line(
     shared: &Shared,
     registry: &Registry,
     tick: usize,
+    width: usize,
 ) -> String {
     let tokens = shared.tokens.load(Ordering::Relaxed);
     let budget = cfg.context_budget_tokens.max(1);
@@ -430,7 +431,7 @@ fn status_line(
     } else {
         String::new()
     };
-    format!(
+    let full = format!(
         "{} · {folder} · {state} · {} tok {}%{}{} · {plugins} plugins{} · {extra}",
         cfg.model(),
         tokens,
@@ -438,7 +439,26 @@ fn status_line(
         key,
         near,
         scrolled,
-    )
+    );
+    if full.chars().count() <= width {
+        return full;
+    }
+    // Tight width: drop the setup hint and the folder first. Ratatui truncation
+    // keeps the head, so a long line would cut the tail, which is the part a
+    // person reads: turn result and scroll position.
+    let lean = format!(
+        "{} · {state} · {} tok {}%{} · {plugins} plugins{} · {extra}",
+        cfg.model(),
+        tokens,
+        pct,
+        near,
+        scrolled,
+    );
+    if lean.chars().count() <= width {
+        return lean;
+    }
+    let n = lean.chars().count();
+    lean.chars().skip(n.saturating_sub(width)).collect()
 }
 
 fn render(
@@ -1103,7 +1123,14 @@ pub fn run(
             }
         }
         tick += 1;
-        let status = status_line(&state.cfg, &state.cwd, &shared, &state.registry, tick);
+        let status = status_line(
+            &state.cfg,
+            &state.cwd,
+            &shared,
+            &state.registry,
+            tick,
+            terminal.size().map(|s| s.width as usize).unwrap_or(80),
+        );
         render(&mut terminal, &shared, &input, &status)?;
     }
 
