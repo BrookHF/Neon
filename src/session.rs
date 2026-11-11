@@ -167,6 +167,86 @@ pub fn summary_message(summary: &str) -> Message {
     Message::user(&format!("Earlier conversation was compacted. Summary:\n{summary}"))
 }
 
+/// One row of the session list: enough to pick a session to resume.
+#[derive(Clone, Debug)]
+pub struct SessionInfo {
+    pub id: String,
+    pub model: String,
+    pub cwd: String,
+    pub entries: usize,
+    pub secs: u64,
+}
+
+/// Sessions newest first. Each row comes from the `meta` line plus a line count.
+/// A file with no readable `meta` still shows up, with an empty model.
+pub fn list(dir: &Path, limit: usize) -> Result<Vec<SessionInfo>> {
+    let mut rows: Vec<SessionInfo> = Vec::new();
+    for entry in std::fs::read_dir(dir)
+        .map_err(|e| AgentError::Config(format!("{}: {e}", dir.display())))?
+    {
+        let entry = entry
+            .map_err(|e| AgentError::Config(format!("{}: {e}", dir.display())))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(id) = name.strip_suffix(".jsonl") else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let mut model = String::new();
+        let mut cwd = String::new();
+        let mut secs = 0u64;
+        let mut entries = 0usize;
+        for line in text.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            entries += 1;
+            if entries == 1 {
+                if let Ok(v) = serde_json::from_str::<Value>(line) {
+                    model = v
+                        .get("model")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    cwd = v
+                        .get("cwd")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    secs = v.get("ts").and_then(|t| t.as_u64()).unwrap_or(0);
+                }
+            }
+        }
+        rows.push(SessionInfo {
+            id: id.to_string(),
+            model,
+            cwd,
+            entries,
+            secs,
+        });
+    }
+    // Ids start with the creation time in hex, so sorting by id is sorting by age.
+    rows.sort_by(|a, b| b.id.cmp(&a.id));
+    rows.truncate(limit.max(1));
+    Ok(rows)
+}
+
+/// A short "how long ago" label, for the session list.
+pub fn human_age(secs: u64) -> String {
+    let now = now_secs();
+    let ago = now.saturating_sub(secs);
+    if secs == 0 || ago < 60 {
+        "just now".to_string()
+    } else if ago < 3600 {
+        format!("{} min ago", ago / 60)
+    } else if ago < 86_400 {
+        format!("{} h ago", ago / 3600)
+    } else {
+        format!("{} d ago", ago / 86_400)
+    }
+}
+
 /// Replay a session file into model-facing messages, plus the `meta` line if present.
 pub fn replay(path: &Path) -> Result<(Vec<Message>, Option<Value>)> {
     let text = std::fs::read_to_string(path)
@@ -358,6 +438,41 @@ mod tests {
         assert_eq!(resolve(&d, "aaaa").unwrap(), "aaaa");
         assert!(resolve(&d, "../evil").is_err());
         assert!(resolve(&d, "missing").is_err());
+    }
+
+    #[test]
+    fn list_reports_newest_first_with_meta_fields() {
+        let d = dir("list");
+        std::fs::write(
+            d.join("10-old.jsonl"),
+            json!({ "k": "meta", "model": "m-old", "cwd": "/old", "ts": 100 }).to_string() + "\n",
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("20-new.jsonl"),
+            json!({ "k": "meta", "model": "m-new", "cwd": "/new", "ts": 200 }).to_string()
+                + "\n"
+                + &json!({ "k": "user", "text": "hi" }).to_string()
+                + "\n",
+        )
+        .unwrap();
+        let rows = list(&d, 5).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, "20-new"); // newest first
+        assert_eq!(rows[0].model, "m-new");
+        assert_eq!(rows[0].entries, 2);
+        assert_eq!(rows[1].id, "10-old");
+        assert_eq!(rows[1].cwd, "/old");
+    }
+
+    #[test]
+    fn human_age_reads_like_a_sentence() {
+        let now = now_secs();
+        assert_eq!(human_age(now), "just now");
+        assert_eq!(human_age(now - 120), "2 min ago");
+        assert_eq!(human_age(now - 7200), "2 h ago");
+        assert_eq!(human_age(now - 172800), "2 d ago");
+        assert_eq!(human_age(0), "just now");
     }
 
     #[test]

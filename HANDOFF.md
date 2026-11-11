@@ -25,15 +25,18 @@ A minimal coding agent in Rust, one binary, nothing installed to run it. One too
 
 ```
 commits   ed6e474 m1, c68f21b wire notes, 1c82cdf m2, ddf4e6b m3, 5242ae8 m4
-files     src/{lib,main,agent,llm,http,tools,config,prompt,messages,error,ui,plugin,profile,session}.rs (4081 lines)
+files     src/{lib,main,agent,llm,http,tools,config,prompt,messages,error,ui,plugin,profile,session}.rs
           fixtures/{demo,limit,steer,compact}.jsonl, fixtures/plugins/echo
           tests/loop.rs   scripts/tui-smoke.py
 deps      serde, serde_json, rustls (ring provider), webpki-roots, yaml-rust2,
           wasmi, ratatui 0.30.2, crossterm 0.29.0
 built     turn/step loop, bash tool with timeout + spill, Gemini SSE adapter, fixture adapter,
           plain stdio REPL, ratatui TUI, steering, abort, wasmi plugin loader + grants,
-          profiles/patches, hot swap, session log, --resume, compaction
-verified  31 cargo tests pass, 13 pty checks pass, all with no key and no network
+          profiles/patches, hot swap, session log, --resume, compaction, command layer
+          (/help /quit /tools /model /hist /compact /sessions /resume /new /plugin),
+          scrollback, colored rows, spinner, first-run config template, --sessions
+verified  cargo test: 46 lib + 7 integration + 3 CLI tests pass; tui-smoke.py: 30 pty checks
+          pass, all with no key and no network
 ```
 
 ## Commands
@@ -41,10 +44,12 @@ verified  31 cargo tests pass, 13 pty checks pass, all with no key and no networ
 ```sh
 cd ~/src/neon
 ~/.cargo/bin/cargo build                      # dev build (glibc)
-~/.cargo/bin/cargo test                       # 31 tests, offline
+~/.cargo/bin/cargo test                       # offline
 python3 scripts/tui-smoke.py                  # drives the TUI on a pty, no key
 ~/.cargo/bin/cargo run -- --fixture fixtures/demo.jsonl -p "say hello"
-~/.cargo/bin/cargo run -- --fixture fixtures/demo.jsonl --resume last -p "more"
+~/.cargo/bin/cargo run -- --fixture fixtures/demo.jsonl "say hello"   # bare task = print mode
+~/.cargo/bin/cargo run -- --fixture fixtures/demo.jsonl --resume      # newest session
+~/.cargo/bin/cargo run -- --fixture fixtures/demo.jsonl --sessions    # list sessions
 ~/.cargo/bin/cargo run                        # TUI
 ~/.cargo/bin/cargo run -- --plain             # plain REPL
 ```
@@ -130,6 +135,34 @@ RUST_MIN_STACK = "8000000"` is committed for tests and UI worker threads.
   Backspace/Delete edit at the cursor, Up/Down recall sent inputs, the cursor is drawn at
   the edit position via `frame.set_cursor_position`.
 
+## Milestone 5: usability — done
+
+- One command layer, `ui::parse_command`, shared by both front ends: `/verb` in the TUI,
+  `:verb` in the plain REPL. Verbs: `help quit tools model hist compact sessions resume new plugin`.
+  `Tab` completes; a mistyped verb or flag names the closest one (`neon::closest`).
+- A command that touches history or the session log runs only when idle. While a turn runs only
+  `help`, `tools`, `sessions` (read-only) and `plugin` (queues) are allowed; the rest answer
+  "needs an idle turn". This keeps the rule that the UI thread never takes the session lock.
+- `/model <name>` changes the model at once (`Config::model_name` is an `Arc<Mutex<String>>`, read
+  with `cfg.model()`), and the **worker** writes the `model_change` entry at the next turn, from
+  `Shared.pending_model`.
+- `/compact` runs on its own thread through `Agent::compact_now`, which is now public and returns
+  the number of entries replaced.
+- `/new` and `/resume <id>|last` swap `UiState.log` and the history, idle only.
+- Scrollback: `Shared.scroll` (lines from the bottom), `PgUp`/`PgDown`, reset at turn start.
+  Transcript rows are capped at `MAX_ROWS` (3000), oldest dropped.
+- Rows are colored by kind; errors are `Row::Error` in red and name the fix.
+- First run: `config::ensure_template` writes a commented `config.yaml` (mode 0600) when the
+  default path is missing. Never on a `--fixture` run, and never on an explicit `--config` path.
+- `neon --sessions` prints the list; `--resume` with no value means `last`; a bare argument is the
+  task, so `neon "list files"` needs no flag.
+
+## Commands a later agent must not break
+
+- The UI thread never takes the session or history lock.
+- Commands apply at the turn boundary, never mid-request.
+- Never create files during a fixture run: tests and the smoke script run offline with no config.
+
 ## Things already learned (do not rediscover)
 
 - Gemini v1beta: the prompt field is `systemInstruction`, not `system`; `additionalProperties`
@@ -160,8 +193,14 @@ RUST_MIN_STACK = "8000000"` is committed for tests and UI worker threads.
   are not conversation text).
 - crossterm 0.29 has no `terminal::execute`; use the `execute!` macro. Enter arrives as
   carriage return, not newline.
-- ratatui diff frames make ANSI-stripped screen captures lose spaces. The smoke script compares
-  whitespace-free strings on purpose.
+- crossterm 0.29 `Event` has no `ScrollUp`/`ScrollDown`: wheel events arrive as
+  `Event::Mouse(MouseEvent)` with `kind` `ScrollUp`/`ScrollDown`. Mouse capture is deliberately
+  left off, so the terminal's own text selection still works; scrolling is `PgUp`/`PgDown`.
+- ratatui 0.30 (`ratatui-core` 0.1.2): `Style::new()` takes no arguments. Use
+  `Style::default().fg(color)`.
+- `scripts/tui-smoke.py` compares whitespace-free strings, so an expectation like "sessions in"
+  never matches: write it as "sessionsin". Colors survive because the script strips ANSI.
+
 - The UI thread must never take the session lock: the worker owns it for the whole turn. The
   status bar reads `Shared.tokens`.
 - Fixture JSON is easy to get wrong by brace counting. Generate fixtures with `json.dumps`, not

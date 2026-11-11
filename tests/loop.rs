@@ -49,7 +49,7 @@ fn harness(
         }),
         Arc::new(|_line: &str| {}),
     )));
-    let session = Arc::new(Session::create(&cfg.sessions_dir, &cfg.model, &dir).unwrap());
+    let session = Arc::new(Session::create(&cfg.sessions_dir, &cfg.model(), &dir).unwrap());
     let agent = Agent {
         adapter: Arc::new(FixtureAdapter::from_file(&fixture(fixture_name)).unwrap()),
         registry: Arc::new(registry),

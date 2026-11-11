@@ -1,4 +1,4 @@
-//! CLI: TUI by default, plain REPL with `--plain`, print mode with `-p`.
+//! CLI: TUI by default, plain REPL with `--plain`, print mode with `-p` or a bare task.
 
 use std::io::{Write, stdin, stdout};
 use std::path::PathBuf;
@@ -6,39 +6,48 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
 use neon::agent::{Agent, Controls, StdioSink};
-use neon::config::{Config, default_path};
+use neon::config::{Config, default_path, ensure_template};
 use neon::llm::{Adapter, FixtureAdapter, GeminiAdapter};
 use neon::messages::{Message, estimate_tokens};
 use neon::plugin::PluginHost;
 use neon::profile;
-use neon::session::{replay, resolve, Session};
+use neon::session::{human_age, list as list_sessions, replay, resolve, Session};
 use neon::tools::{BashTool, PluginRow, Registry};
 use neon::ui;
 use neon::VERSION;
 
 const HELP: &str = r#"neon - a minimal coding agent
 
-  neon                    TUI in the current folder
-  neon --plain            plain REPL, for pipes and dumb terminals
-  neon -p "task"          run one task and exit
-  neon --fixture f.jsonl  replay a recorded model stream, no key and no network
-  neon --resume <id>|last continue a saved session (~/.local/state/neon/sessions)
-  neon --model <name>     override the model from config
-  neon --profile <name>   plugin rows from ~/.config/neon/profiles/<name>.yaml
-  neon --patch <file>     patch layer over the profile, last layer wins
-  neon --config <path>    use another config file
+  neon                      TUI in the current folder
+  neon "task"               run one task and exit, like -p
+  neon -p "task"            run one task and exit
+  neon --plain              plain REPL, for pipes and dumb terminals
+  neon --fixture f.jsonl    replay a recorded model stream, no key and no network
+  neon --sessions           list saved sessions, newest first
+  neon --resume             continue the newest session (--resume <id> for a specific one)
+  neon --model <name>       override the model from config
+  neon --profile <name>     plugin rows from ~/.config/neon/profiles/<name>.yaml
+  neon --patch <file>       patch layer over the profile, last layer wins
+  neon --config <path>      use another config file
+  neon --help               this text · neon --version prints the version
 
-TUI keys: Enter sends or steers · Left/Right/Home/End move the cursor · Up/Down recall
-history · Backspace/Delete edit at the cursor · Ctrl+C aborts a run, quits when idle · Ctrl+D quits
-TUI commands: /plugin list|load|unload|reload (applies at the next turn)
-Config: ~/.config/neon/config.yaml (api_key there, never in the environment)
-Plain REPL commands: :tools, :model, :hist, :plugin <verb>, :quit
+TUI keys: Enter sends or steers · PgUp/PgDown or mouse scroll the transcript · Tab completes a
+command · Left/Right/Home/End move the cursor · Up/Down recall history · Backspace/Delete edit at
+the cursor · Ctrl+C stops a run, quits when idle · Ctrl+D quits
+TUI commands: /help /quit /tools /model <name> /hist /compact /sessions /resume <id>|last /new
+  /plugin list|load|unload|reload queues and applies at the next turn
+Plain REPL commands: the same verbs with a colon: :help :quit :tools :model :hist :compact
+  :sessions :resume :new :plugin <verb>
+Config: ~/.config/neon/config.yaml - api_key lives there, never in the environment. First run
+  writes a commented starter file there. No key yet: run with --fixture <file>.
 "#;
 
+#[derive(Debug)]
 struct Args {
     task: Option<String>,
     fixture: Option<PathBuf>,
     resume: Option<String>,
+    sessions: bool,
     model: Option<String>,
     config: Option<PathBuf>,
     profile: Option<String>,
@@ -48,11 +57,46 @@ struct Args {
     version: bool,
 }
 
+const FLAGS: &[&str] = &[
+    "-p",
+    "--print",
+    "--plain",
+    "--fixture",
+    "--sessions",
+    "--resume",
+    "--model",
+    "--profile",
+    "--patch",
+    "--config",
+    "--help",
+    "--version",
+];
+
+/// The value that follows a flag. The message says what the flag needs.
+fn value(raw: &[String], i: usize, name: &str) -> Result<String, String> {
+    raw.get(i + 1)
+        .map(|v| v.clone())
+        .ok_or_else(|| format!("{name} needs a value (neon {name} <value>), or run it alone for the newest session"))
+}
+
+/// A flag's value only when the next argument is not another flag.
+fn optional(raw: &[String], i: usize) -> Option<String> {
+    raw.get(i + 1)
+        .filter(|v| !v.starts_with('-'))
+        .map(|v| v.clone())
+}
+
+/// The closest known flag to a mistyped one, or None.
+fn suggest(arg: &str) -> Option<&'static str> {
+    neon::closest(arg, FLAGS.iter().copied())
+}
+
 fn parse_args(raw: Vec<String>) -> Result<Args, String> {
     let mut a = Args {
         task: None,
         fixture: None,
         resume: None,
+        sessions: false,
         model: None,
         config: None,
         profile: None,
@@ -61,42 +105,48 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
         help: false,
         version: false,
     };
-    let mut i = 1;
+    let mut i = 1usize;
     while i < raw.len() {
-        match raw[i].as_str() {
+        let flag = raw[i].as_str();
+        match flag {
             "-p" | "--print" => {
-                let v = raw.get(i + 1).ok_or("-p needs a task")?;
-                a.task = Some(v.clone());
+                a.task = Some(value(&raw, i, "-p")?);
                 i += 2;
             }
             "--fixture" => {
-                let v = raw.get(i + 1).ok_or("--fixture needs a file")?;
-                a.fixture = Some(PathBuf::from(v));
+                a.fixture = Some(PathBuf::from(value(&raw, i, "--fixture")?));
                 i += 2;
             }
             "--resume" => {
-                let v = raw.get(i + 1).ok_or("--resume needs a session id or last")?;
-                a.resume = Some(v.clone());
-                i += 2;
+                match optional(&raw, i) {
+                    Some(id) => {
+                        a.resume = Some(id);
+                        i += 2;
+                    }
+                    None => {
+                        a.resume = Some("last".to_string());
+                        i += 1;
+                    }
+                }
+            }
+            "--sessions" => {
+                a.sessions = true;
+                i += 1;
             }
             "--model" => {
-                let v = raw.get(i + 1).ok_or("--model needs a name")?;
-                a.model = Some(v.clone());
+                a.model = Some(value(&raw, i, "--model")?);
                 i += 2;
             }
             "--config" => {
-                let v = raw.get(i + 1).ok_or("--config needs a path")?;
-                a.config = Some(PathBuf::from(v));
+                a.config = Some(PathBuf::from(value(&raw, i, "--config")?));
                 i += 2;
             }
             "--profile" => {
-                let v = raw.get(i + 1).ok_or("--profile needs a name")?;
-                a.profile = Some(v.clone());
+                a.profile = Some(value(&raw, i, "--profile")?);
                 i += 2;
             }
             "--patch" => {
-                let v = raw.get(i + 1).ok_or("--patch needs a file")?;
-                a.patches.push(PathBuf::from(v));
+                a.patches.push(PathBuf::from(value(&raw, i, "--patch")?));
                 i += 2;
             }
             "--plain" => {
@@ -111,10 +161,53 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
                 a.version = true;
                 i += 1;
             }
-            other => return Err(format!("unknown argument: {other}")),
+            other if other.starts_with('-') => {
+                return Err(match suggest(other) {
+                    Some(f) => format!("unknown argument: {other} (did you mean {f}?)"),
+                    None => format!("unknown argument: {other} (neon --help lists them)"),
+                });
+            }
+            // A bare word is the task, so `neon "list files"` needs no flag.
+            task => {
+                if a.task.is_some() {
+                    return Err(format!(
+                        "a task is already set; extra argument: {task} (give one task, or drop --plain)"
+                    ));
+                }
+                a.task = Some(task.to_string());
+                i += 1;
+            }
         }
     }
     Ok(a)
+}
+
+fn print_sessions(dir: &std::path::Path) -> ExitCode {
+    match list_sessions(dir, 20) {
+        Ok(rows) => {
+            if rows.is_empty() {
+                println!("no sessions in {} yet", dir.display());
+                return ExitCode::SUCCESS;
+            }
+            println!("sessions in {} · newest first", dir.display());
+            for r in rows {
+                println!(
+                    "  {} · {} · {} entries · {} · {}",
+                    r.id,
+                    if r.model.is_empty() { "?" } else { &r.model },
+                    r.entries,
+                    human_age(r.secs),
+                    r.cwd
+                );
+            }
+            println!("continue one with: neon --resume <id>");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("neon: {e}");
+            ExitCode::from(8)
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -135,6 +228,20 @@ fn main() -> ExitCode {
     }
 
     let config_path = args.config.clone().unwrap_or_else(default_path);
+    let using_default_config = args.config.is_none();
+
+    // First run: write a commented starter file so a person has something to edit,
+    // instead of an error that names nothing. Fixture runs never touch the real config.
+    if using_default_config && args.fixture.is_none() && !config_path.exists() {
+        match ensure_template(&config_path) {
+            Ok(()) => println!(
+                "neon: created {} (mode 0600) - put your key in api_key to talk to the model",
+                config_path.display()
+            ),
+            Err(e) => eprintln!("neon: could not create {}: {e}", config_path.display()),
+        }
+    }
+
     let mut cfg = match Config::load(&config_path) {
         Ok(c) => c,
         Err(_e) if args.fixture.is_some() => Config::default(),
@@ -144,10 +251,14 @@ fn main() -> ExitCode {
         }
     };
     if let Some(m) = args.model.clone() {
-        cfg.model = m;
+        cfg.set_model(&m);
     }
     if let Some(p) = args.profile.clone() {
         cfg.profile = p;
+    }
+
+    if args.sessions {
+        return print_sessions(&cfg.sessions_dir);
     }
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -161,7 +272,7 @@ fn main() -> ExitCode {
             let id = match resolve(&cfg.sessions_dir, target) {
                 Ok(id) => id,
                 Err(e) => {
-                    eprintln!("neon: {e}");
+                    eprintln!("neon: {e}\nrun neon --sessions to see what is saved.");
                     return ExitCode::from(8);
                 }
             };
@@ -180,11 +291,11 @@ fn main() -> ExitCode {
                 .map(str::to_string);
             if args.model.is_none() {
                 if let Some(m) = &meta_model {
-                    cfg.model = m.clone();
+                    cfg.set_model(m);
                 }
             }
-            if meta_model.as_deref() != Some(cfg.model.as_str()) {
-                if let Err(e) = sess.record_model_change(&cfg.model) {
+            if meta_model.as_deref() != Some(cfg.model().as_str()) {
+                if let Err(e) = sess.record_model_change(&cfg.model()) {
                     eprintln!("neon: {e}");
                     return ExitCode::from(8);
                 }
@@ -195,7 +306,7 @@ fn main() -> ExitCode {
         }
         None => {
             resumed = None;
-            match Session::create(&cfg.sessions_dir, &cfg.model, &cwd) {
+            match Session::create(&cfg.sessions_dir, &cfg.model(), &cwd) {
                 Ok(s) => Arc::new(s),
                 Err(e) => {
                     eprintln!("neon: {e}");
@@ -246,6 +357,7 @@ fn main() -> ExitCode {
     let history = Arc::new(Mutex::new(history));
     let cfg = Arc::new(cfg);
 
+    // Print mode: say where you are, once, and never ask for input.
     if let Some(task) = args.task.clone() {
         let agent = Agent {
             adapter,
@@ -264,7 +376,15 @@ fn main() -> ExitCode {
         let mut history = history.lock().expect("history lock");
         history.push(msg);
         match agent.run_turn(&mut history) {
-            Ok(_) => return ExitCode::SUCCESS,
+            Ok(o) => {
+                if o.stopped_at_limit {
+                    eprintln!(
+                        "\nneon: stopped at {} steps - raise max_steps in config.yaml",
+                        o.steps
+                    );
+                }
+                return ExitCode::SUCCESS;
+            }
             Err(e) => {
                 eprintln!("\nneon: {e}");
                 return ExitCode::from(5);
@@ -297,6 +417,162 @@ fn main() -> ExitCode {
     }
 }
 
+/// Run one plain-REPL command. Some(code) ends the REPL; None means it printed and stays.
+fn plain_command(
+    cmd: ui::Command,
+    registry: &Registry,
+    plugins: &Mutex<PluginHost>,
+    cfg: &Config,
+    agent: &Agent,
+    history: &Mutex<Vec<Message>>,
+    log: &Session,
+    cwd: &std::path::Path,
+    config_path: &std::path::Path,
+) -> Option<ExitCode> {
+    match cmd {
+        ui::Command::Quit => Some(ExitCode::SUCCESS),
+        ui::Command::Help => {
+            for l in ui::help_lines() {
+                println!("{l}");
+            }
+            None
+        }
+        ui::Command::Tools => {
+            for schema in registry.schemas() {
+                let row = if schema.plugin_row.is_empty() {
+                    "core".to_string()
+                } else {
+                    schema.plugin_row.clone()
+                };
+                println!("- {} [{}] {}", schema.name, row, schema.description);
+            }
+            None
+        }
+        ui::Command::ShowModel => {
+            println!("{} (config {})", cfg.model(), config_path.display());
+            None
+        }
+        ui::Command::SetModel(name) => {
+            let old = cfg.model();
+            cfg.set_model(&name);
+            if let Err(e) = log.record_model_change(&name) {
+                println!("session log failed: {e}");
+            }
+            println!("model {old} -> {name}");
+            None
+        }
+        ui::Command::Hist => {
+            let hist = history.lock().expect("session lock");
+            let tokens = estimate_tokens(&hist);
+            let budget = cfg.context_budget_tokens.max(1);
+            println!(
+                "{} messages · {} tok of {} budget ({}%) · logged in {}",
+                hist.len(),
+                tokens,
+                budget,
+                (tokens * 100) / budget,
+                log.path.display()
+            );
+            None
+        }
+        ui::Command::Compact => {
+            let mut hist = history.lock().expect("session lock");
+            match agent.compact_now(&mut hist) {
+                Ok(replaced) => println!(
+                    "{}",
+                    if replaced == 0 {
+                        "nothing to compact - the history already fits the budget".to_string()
+                    } else {
+                        format!(
+                            "compacted {replaced} messages into a summary · now {} tok",
+                            estimate_tokens(&hist)
+                        )
+                    }
+                ),
+                Err(e) => println!("compact failed: {e}"),
+            }
+            None
+        }
+        ui::Command::Sessions => {
+            match list_sessions(&cfg.sessions_dir, 20) {
+                Ok(rows) => {
+                    if rows.is_empty() {
+                        println!("no sessions in {} yet", cfg.sessions_dir.display());
+                    } else {
+                        for r in rows {
+                            println!(
+                                "- {} · {} · {} entries · {} · {}",
+                                r.id,
+                                if r.model.is_empty() { "?" } else { &r.model },
+                                r.entries,
+                                human_age(r.secs),
+                                r.cwd
+                            );
+                        }
+                    }
+                }
+                Err(e) => println!("sessions: {e}"),
+            }
+            None
+        }
+        ui::Command::Resume(target) => {
+            match resolve(&cfg.sessions_dir, &target).and_then(|id| {
+                replay(&cfg.sessions_dir.join(format!("{id}.jsonl")))
+                    .map(|(msgs, meta)| (id, msgs, meta))
+            }) {
+                Ok((id, msgs, meta)) => {
+                    if let Some(m) = meta
+                        .as_ref()
+                        .and_then(|m| m.get("model"))
+                        .and_then(|v| v.as_str())
+                    {
+                        cfg.set_model(m);
+                    }
+                    let mut hist = history.lock().expect("session lock");
+                    *hist = msgs;
+                    println!(
+                        "resumed session {} · {} messages · model {}",
+                        id,
+                        hist.len(),
+                        cfg.model()
+                    );
+                }
+                Err(e) => println!("resume: {e}"),
+            }
+            None
+        }
+        ui::Command::New => {
+            match Session::create(&cfg.sessions_dir, &cfg.model(), cwd) {
+                Ok(sess) => {
+                    *history.lock().expect("session lock") = Vec::new();
+                    println!("new session {} · the model starts empty", sess.id);
+                }
+                Err(e) => println!("new session: {e}"),
+            }
+            None
+        }
+        ui::Command::Plugin(rest) => {
+            match plugins.lock().map(|mut host| host.handle_command(&rest)) {
+                Ok(Ok(note)) => println!("{note}"),
+                Ok(Err(e)) => println!("plugin: {e}"),
+                Err(_) => println!("plugin host is busy"),
+            }
+            None
+        }
+        ui::Command::Unknown(name) => {
+            let near = ui::suggested_command(&name);
+            println!(
+                "unknown command: {name}{} · :help lists them",
+                match near {
+                    Some(c) => format!(" (did you mean /{c}?)"),
+                    None => String::new(),
+                }
+            );
+            None
+        }
+    }
+}
+
 fn plain_repl(
     adapter: Arc<dyn Adapter>,
     registry: Arc<Registry>,
@@ -320,11 +596,17 @@ fn plain_repl(
         session: Some(log.clone()),
     };
 
-    println!("neon {VERSION} · model {} · folder {} · session {}", cfg.model, cwd.display(), log.id);
+    println!("neon {VERSION} · model {} · folder {} · session {}", cfg.model(), cwd.display(), log.id);
     if let Some(n) = resumed {
         println!("resumed {n} messages");
     }
-    println!("Type a task. :quit to leave. Ctrl+C leaves too.");
+    if cfg.api_key.trim().is_empty() {
+        println!(
+            "no api_key yet · add it to {} · or run with --fixture <file>",
+            default_path().display()
+        );
+    }
+    println!("commands: :help :quit :tools :model <name> :hist :compact :sessions :resume <id>|last :new :plugin <verb>");
 
     let stdin_handle = stdin();
     loop {
@@ -339,43 +621,24 @@ fn plain_repl(
         if input.is_empty() {
             continue;
         }
-        match input.as_str() {
-            ":quit" | ":q" => return ExitCode::SUCCESS,
-            ":tools" => {
-                for schema in registry.schemas() {
-                    println!("- {}", schema.name);
-                }
-                continue;
+        // A leading colon or slash is a command; anything else is a task for the model.
+        if input.starts_with(':') || input.starts_with('/') {
+            if let Some(code) = plain_command(
+                ui::parse_command(&input),
+                &registry,
+                &plugins,
+                &cfg,
+                &agent,
+                &history,
+                &log,
+                &cwd,
+                config_path,
+            ) {
+                return code;
             }
-            ":model" => {
-                println!("{} (config {})", cfg.model, config_path.display());
-                continue;
-            }
-            ":hist" => {
-                let hist = history.lock().expect("session lock");
-                println!(
-                    "{} messages, about {} tokens, logged in {}",
-                    hist.len(),
-                    estimate_tokens(&hist),
-                    log.path.display()
-                );
-                continue;
-            }
-            other if other == ":plugin" || other.starts_with(":plugin ") => {
-                let rest = other.trim_start_matches(":plugin").to_string();
-                match plugins.lock().map(|mut host| host.handle_command(&rest)) {
-                    Ok(Ok(note)) => println!("{note}"),
-                    Ok(Err(e)) => println!("plugin: {e}"),
-                    Err(_) => println!("plugin host is busy"),
-                }
-                continue;
-            }
-            other if other.starts_with(':') => {
-                println!("unknown command: {other}");
-                continue;
-            }
-            _ => {}
+            continue;
         }
+
         let msg = Message::user(&input);
         if let Err(e) = log.record_message(&msg) {
             eprintln!("[session log failed: {e}]");
@@ -387,5 +650,67 @@ fn plain_repl(
                 eprintln!("[error: {e}]");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_args, suggest};
+
+    #[test]
+    fn flags_and_a_bare_task_parse() {
+        let a = parse_args(vec![
+            "neon".to_string(),
+            "--fixture".to_string(),
+            "f.jsonl".to_string(),
+            "--resume".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(a.resume.as_deref(), Some("last")); // --resume alone means newest
+        assert!(a.fixture.is_some());
+
+        let a = parse_args(vec!["neon".to_string(), "list files".to_string()]).unwrap();
+        assert_eq!(a.task.as_deref(), Some("list files"));
+
+        let a = parse_args(vec![
+            "neon".to_string(),
+            "-p".to_string(),
+            "go".to_string(),
+            "--sessions".to_string(),
+        ])
+        .unwrap();
+        assert!(a.sessions);
+        assert_eq!(a.task.as_deref(), Some("go"));
+
+        assert!(parse_args(vec!["neon".to_string(), "-p".to_string()]).is_err());
+        assert!(parse_args(vec![
+            "neon".to_string(),
+            "-p".to_string(),
+            "one".to_string(),
+            "two".to_string()
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn a_typo_names_the_flag_it_meant() {
+        assert_eq!(suggest("--restar"), Some("--resume"));
+        assert_eq!(suggest("--fixtur"), Some("--fixture"));
+        assert_eq!(suggest("--plains"), Some("--plain"));
+        assert_eq!(suggest("--totally-different"), None);
+        let err = parse_args(vec!["neon".to_string(), "--restar".to_string()]).unwrap_err();
+        assert!(err.contains("did you mean --resume?"));
+    }
+
+    #[test]
+    fn a_flag_before_another_flag_takes_no_value() {
+        let a = parse_args(vec![
+            "neon".to_string(),
+            "--resume".to_string(),
+            "--plain".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(a.resume.as_deref(), Some("last"));
+        assert!(a.plain);
     }
 }

@@ -172,8 +172,9 @@ impl Agent {
 
     /// Ask the model to summarize the oldest span so the history fits the budget again.
     /// The summary replaces the span in the model-facing history; originals stay in the log.
-    /// Returns true when the history was rewritten.
-    fn compact(&self, history: &mut Vec<Message>) -> Result<bool> {
+    /// Returns the number of entries replaced, 0 when there was nothing worth summarizing.
+    /// Public so `/compact` can run on demand, not only when the budget is crossed.
+    pub fn compact_now(&self, history: &mut Vec<Message>) -> Result<usize> {
         let keep = self.cfg.context_budget_tokens * 3 / 5;
 
         // Keep the newest whole messages that fit; a call and its results stay together.
@@ -188,7 +189,7 @@ impl Agent {
             split -= 1;
         }
         if split == 0 {
-            return Ok(false); // everything fits; nothing worth summarizing
+            return Ok(0); // everything fits; nothing worth summarizing
         }
 
         let mut tail = history.split_off(split);
@@ -205,7 +206,7 @@ impl Agent {
             system: COMPACT_SYSTEM.to_string(),
             messages: history.clone(),
             tools: Vec::new(),
-            model: self.cfg.model.clone(),
+            model: self.cfg.model(),
             temperature: None,
             max_tokens: None,
         };
@@ -227,7 +228,7 @@ impl Agent {
         if let Some(s) = &self.session {
             s.record_compaction(&summary, replaced)?;
         }
-        Ok(true)
+        Ok(replaced)
     }
 
     fn run_inner(&self, history: &mut Vec<Message>) -> Result<TurnOutcome> {
@@ -253,12 +254,13 @@ impl Agent {
                 });
             }
             if estimate_tokens(history) > self.cfg.context_budget_tokens {
-                if self.compact(history)? {
+                if self.compact_now(history)? > 0 {
                     self.sink.note("context compacted");
                 }
                 if estimate_tokens(history) > self.cfg.context_budget_tokens {
                     return Err(AgentError::Adapter(format!(
-                        "context still over the {} token budget after compaction",
+                        "context is still over the {} token budget \u{2014} run /compact \u{2014} \
+                         or raise context_budget_tokens in config.yaml",
                         self.cfg.context_budget_tokens
                     )));
                 }
@@ -269,7 +271,7 @@ impl Agent {
                 system: build_system(&self.cwd),
                 messages: history.clone(),
                 tools: self.registry.schemas(),
-                model: self.cfg.model.clone(),
+                model: self.cfg.model(),
                 temperature: None,
                 max_tokens: Some(self.cfg.max_tokens),
             };
@@ -285,7 +287,8 @@ impl Agent {
                 Event::Done { finish_reason } => {
                     if finish_reason.as_deref() == Some("MAX_TOKENS") {
                         self.sink.note(
-                            "output hit max_output_tokens \u{2014} raise max_tokens in config.yaml",
+                            "output hit max_output_tokens \u{2014} raise max_tokens in config.yaml \u{2014} \
+                             or split the write into smaller steps",
                         );
                     }
                 }

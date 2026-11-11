@@ -49,8 +49,10 @@ carry the seams. Two dispatch modes only: `emit` (observe) and `waterfall` (arou
 ~/.cache/neon/spill/<call-id>.out     # full raw tool output
 ```
 
-CLI: `neon` interactive, `neon -p "task"` print mode, `--resume <id>|last`,
-`--model <name>`, `--profile <name>`, `--patch <file>`.
+CLI: `neon` interactive, `neon "task"` or `neon -p "task"` print mode, `--sessions` list,
+`--resume [id|last]`, `--model <name>`, `--profile <name>`, `--patch <file>`.
+A mistyped flag names the closest one. With no config file, first run writes a commented
+template at `~/.config/neon/config.yaml` (mode 0600) instead of failing.
 
 ## Agent loop
 
@@ -137,10 +139,20 @@ Native wire format, not the OpenAI-compatible one.
 ## TUI
 
 `ratatui` + `crossterm`: streaming text area, tool cards (name, args, status, excerpt),
-status bar (model, token estimate, loaded plugins), input line with a visible cursor:
-arrow keys and Home/End move it, Backspace/Delete edit at the cursor, Up/Down recall
-sent inputs, Paste inserts at the cursor. Plain stdio mode stays as a
-fallback for pipes and phones with a dumb terminal (`neon --plain`).
+status bar (model, folder, spinner with elapsed seconds while a turn runs, token estimate and
+budget share, loaded plugins, scrollback position, last turn's result), input line with a visible
+cursor: arrow keys and Home/End move it, Backspace/Delete edit at the cursor, Up/Down recall sent
+inputs, Paste inserts at the cursor, Tab completes a command, PgUp/PgDown scroll the transcript.
+Rows are colored by kind (user cyan, text white, call yellow, result green, error red, note gray).
+
+One command layer, shared by the TUI (`/verb`) and the plain REPL (`:verb`): `help`, `quit`,
+`tools`, `model <name>`, `hist`, `compact`, `sessions`, `resume <id>|last`, `new`, `plugin`.
+A command that touches history or the session log runs only when idle, because the worker owns
+those for the whole turn; while a turn runs only `help`, `tools`, `sessions`, and `plugin` (which
+queues) are allowed. A `/model` change takes effect at once and is written to the log by the
+worker at the next turn boundary. A mistyped command names the closest one.
+
+Plain stdio mode stays as a fallback for pipes and phones with a dumb terminal (`neon --plain`).
 
 ## Testing
 
@@ -148,6 +160,8 @@ fallback for pipes and phones with a dumb terminal (`neon --plain`).
   no network: `neon --profile test --fixture <file>`.
 - Unit tests for the JSON codec, SSE parser, truncation and spill, capability gating, and a
   tiny fixture plugin built by the plugin crate.
+- `scripts/tui-smoke.py` drives the TUI on a pty: transcript, tool cards, steering, abort,
+  commands, scrollback, `/model` change, `/quit`, and the first-run config template.
 - Real-API tests exist but self-skip when no key is present.
 
 ## Milestones
@@ -156,3 +170,5 @@ fallback for pipes and phones with a dumb terminal (`neon --plain`).
 2. `ratatui` TUI, steering, abort, tool cards.
 3. WASM plugin loader, capability grants, profiles and patches, hot swap, `/plugin` commands.
 4. Session log, `--resume`, compaction.
+5. Usability pass: command layer in both front ends, `/help`, scrollback, color, spinner,
+   first-run config template, session list, error text that names the fix.
