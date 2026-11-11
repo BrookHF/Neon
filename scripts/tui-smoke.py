@@ -55,6 +55,12 @@ def screen(args, keys, wait, env=None):
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
     child_env = os.environ.copy()
+    # The wasmi debug interpreter needs a deep host stack. cargo sets RUST_MIN_STACK
+    # from .cargo/config.toml only for processes it launches, so a CI step that runs
+    # this script directly would not pass it to neon. Set it here.
+    child_env.setdefault("RUST_MIN_STACK", "8000000")
+    # GitHub Actions runners report TERM=unknown; give neon a real terminal type.
+    child_env.setdefault("TERM", "xterm-256color")
     if env:
         child_env.update(env)
     proc = subprocess.Popen([BIN] + args, stdin=slave, stdout=slave, stderr=slave, cwd=REPO, env=child_env)
