@@ -103,9 +103,9 @@ def main():
 
     s, rc = screen(["--fixture", "fixtures/demo.jsonl"], [(b"say hello\r", 0.2)], 2.5)
     n = norm(s)
-    results.append(("turn renders cards", "echohellofromneon" in n and "->bash" in n), s)
-    results.append(("reply shown", "Itprintedhellofromneon" in n), s)
-    results.append(("status bar", "tok" in n and "2steps" in n), s)
+    results.append(("turn renders cards", "echohellofromneon" in n and "->bash" in n, s))
+    results.append(("reply shown", "Itprintedhellofromneon" in n, s))
+    results.append(("status bar", "tok" in n and "2steps" in n, s))
 
     # The turn appended a JSONL session log: meta, user, assistant, tool_result.
     logged = False
@@ -117,7 +117,7 @@ def main():
             and '"k":"assistant"' in text
             and '"k":"tool_result"' in text
         )
-    results.append(("session logged", logged), s)
+    results.append(("session logged", logged, s))
 
     # --resume replays the log before the new turn starts.
     s, rc = screen(
@@ -127,7 +127,7 @@ def main():
     )
     n = norm(s)
     results.append(
-        ("resume replays history", "resumed4messages" in n and "Itprintedhellofromneon" in n), s)
+        ("resume replays history", "resumed4messages" in n and "Itprintedhellofromneon" in n, s))
 
     # Profile rows load at the turn boundary; /plugin list shows them after the turn.
     profiles = os.path.join(os.path.expanduser("~"), ".config", "neon", "profiles")
@@ -145,8 +145,8 @@ def main():
         1.5,
     )
     n = norm(s)
-    results.append(("profile row loaded", "loaded:echo" in n), s)
-    results.append(("plugin count in status", "1plugins" in n), s)
+    results.append(("profile row loaded", "loaded:echo" in n, s))
+    results.append(("plugin count in status", "1plugins" in n, s))
     os.remove(smoke)
 
     # Long replies must wrap inside the window, not be cut at the first line.
@@ -154,7 +154,7 @@ def main():
     write_fixture(long, [chunk([{"text": "word " * 40 + "ENDWORD"}])])
     s, rc = screen(["--fixture", long], [(b"go\r", 0.2)], 2.5)
     n = norm(s)
-    results.append(("long reply wraps in window", "ENDWORD" in n), s)
+    results.append(("long reply wraps in window", "ENDWORD" in n, s))
     os.remove(long)
 
     # The cursor moves with arrow keys and edits mid-line.
@@ -164,7 +164,7 @@ def main():
         2.5,
     )
     n = norm(s)
-    results.append(("cursor edit mid-line", ">abxcd" in n), s)
+    results.append(("cursor edit mid-line", ">abxcd" in n, s))
 
     slow = os.path.join(REPO, "fixtures", "slow-tmp.jsonl")
     write_fixture(
@@ -180,10 +180,10 @@ def main():
         6.0,
     )
     n = norm(s)
-    results.append(("steering ran the first call", "echoone" in n), s)
-    results.append(("steering dropped the rest", "echotwo" not in n and "echothree" not in n), s)
-    results.append(("steering shown in transcript", ">halt" in n), s)
-    results.append(("next step answered", "stoppedearly" in n), s)
+    results.append(("steering ran the first call", "echoone" in n, s))
+    results.append(("steering dropped the rest", "echotwo" not in n and "echothree" not in n, s))
+    results.append(("steering shown in transcript", ">halt" in n, s))
+    results.append(("next step answered", "stoppedearly" in n, s))
     os.remove(slow)
 
     write_fixture(
@@ -192,9 +192,9 @@ def main():
     )
     s, rc = screen(["--fixture", slow], [(b"go\r", 0.2), (b"\x03", 1.0)], 3.0)
     n = norm(s)
-    results.append(("abort note shown", "#aborted" in n), s)
-    results.append(("abort killed the in-flight tool", "exit:-1" in n and "[error]" in n), s)
-    results.append(("abort dropped later calls", "echob" not in n), s)
+    results.append(("abort note shown", "#aborted" in n, s))
+    results.append(("abort killed the in-flight tool", "exit:-1" in n and "[error]" in n, s))
+    results.append(("abort dropped later calls", "echob" not in n, s))
     os.remove(slow)
 
     # /help lists the keys and every command; PgUp scrolls the transcript back.
@@ -205,8 +205,8 @@ def main():
         2.0,
     )
     n = norm(s)
-    results.append(("help shows keys and commands", "/help" in n and "/compact" in n and "PgUp" in n), s)
-    results.append(("scrollback indicator shows", "scrolled" in n and "\u2191" in n), s)
+    results.append(("help shows keys and commands", "/help" in n and "/compact" in n and "PgUp" in n, s))
+    results.append(("scrollback indicator shows", "scrolled" in n and "\u2191" in n, s))
     os.remove(long)
 
     # /tools names the tools and where each one came from; Tab completes a command.
@@ -216,8 +216,8 @@ def main():
         2.0,
     )
     n = norm(s)
-    results.append(("tools lists bash with its source", "bash[core]" in n), s)
-    results.append(("tab completes the command", "> /plugin".replace(" ", "") in n and "nopluginsloaded" in n), s)
+    results.append(("tools lists bash with its source", "bash[core]" in n, s))
+    results.append(("tab completes the command", "> /plugin".replace(" ", "") in n and "nopluginsloaded" in n, s))
 
     # /model changes the model at once, and the status bar shows the new one.
     s, rc = screen(
@@ -226,8 +226,8 @@ def main():
         2.5,
     )
     n = norm(s)
-    results.append(("model change shows in status", "->gemini-3.5-flash" in n and "gemini-3.5-flash\u00b7" in n), s)
-    results.append(("model change logged", "model_change" in open_latest_session()), s)
+    results.append(("model change shows in status", "->gemini-3.5-flash" in n and "gemini-3.5-flash\u00b7" in n, s))
+    results.append(("model change logged", "model_change" in open_latest_session(), s))
 
     # /hist reports the size and the budget share; /sessions lists saved sessions.
     s, rc = screen(
@@ -236,8 +236,8 @@ def main():
         2.0,
     )
     n = norm(s)
-    results.append(("hist shows tokens and budget", "messages" in n and "budget" in n and "%" in n), s)
-    results.append(("sessions lists saved sessions", "sessionsin" in n and "/resume" in n), s)
+    results.append(("hist shows tokens and budget", "messages" in n and "budget" in n and "%" in n, s))
+    results.append(("sessions lists saved sessions", "sessionsin" in n and "/resume" in n, s))
 
     # A mistyped command says what was meant, in red rather than as a silent failure.
     s, rc = screen(
@@ -246,11 +246,11 @@ def main():
         1.5,
     )
     n = norm(s)
-    results.append(("unknown command suggests one", "!unknowncommand:hepl" in n and "didyoumean/help" in n), s)
+    results.append(("unknown command suggests one", "!unknowncommand:hepl" in n and "didyoumean/help" in n, s))
 
     # /quit leaves on its own, so a person does not need Ctrl+C.
     s, rc = screen(["--fixture", "fixtures/demo.jsonl"], [(b"/quit\r", 0.5)], 1.5)
-    results.append(("quit command exits clean", rc == 0), s)
+    results.append(("quit command exits clean", rc == 0, s))
 
     # First run with no config file: neon writes a starter file and says where it is.
     home = os.path.join(REPO, "tmp-first-home")
@@ -259,12 +259,12 @@ def main():
     os.makedirs(home)
     s, rc = screen(["--plain"], [(b":help\r", 0.5), (b":quit\r", 0.5)], 1.5, env={"HOME": home})
     cfg = os.path.join(home, ".config", "neon", "config.yaml")
-    results.append(("first run writes the starter config", os.path.isfile(cfg) and "created" in norm(s)), s)
+    results.append(("first run writes the starter config", os.path.isfile(cfg) and "created" in norm(s), s))
     if os.path.isfile(cfg):
-        results.append(("starter config is mode 0600", (os.stat(cfg).st_mode & 0o777) == 0o600), s)
+        results.append(("starter config is mode 0600", (os.stat(cfg).st_mode & 0o777) == 0o600, s))
         text = open(cfg).read()
-        results.append(("starter config names api_key", "api_key" in text and "apikey" in text), s)
-    results.append(("plain help lists commands", ":help" in norm(s) and ":compact" in norm(s)), s)
+        results.append(("starter config names api_key", "api_key" in text and "apikey" in text, s))
+    results.append(("plain help lists commands", ":help" in norm(s) and ":compact" in norm(s), s))
     shutil.rmtree(home, ignore_errors=True)
 
     failed = 0
