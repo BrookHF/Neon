@@ -1,3 +1,10 @@
 /target
 *.log
 /rust_out
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+/dist/
+*.sqlite
+*.tar.gz
